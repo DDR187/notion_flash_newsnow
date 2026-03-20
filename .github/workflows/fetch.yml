@@ -1,43 +1,27 @@
 name: Fetch flashes to Notion
 
 on:
-
-schedule:
-
-- cron: "*/5*   ** *"
-
-workflow_dispatch: {}
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
 
 jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-run:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-runs-on: ubuntu-latest
+      - name: Install deps
+        run: npm ci || npm install
 
-steps:
-
-- name: Checkout
-    
-    uses: actions/checkout@v4
-    
-- name: Setup Node
-    
-    uses: actions/setup-node@v4
-    
-    with:
-    
-    node-version: "20"
-    
-- name: Install deps
-    
-    run: npm ci || npm install
-    
-- name: Run
-    
-    env:
-    
-    NOTION_TOKEN: $ secrets.NOTION_TOKEN 
-    
-    NOTION_DATABASE_ID: $ secrets.NOTION_DATABASE_ID 
-    
-    run: node index.js
+      - name: Run
+        env:
+          NOTION_TOKEN: $ secrets.NOTION_TOKEN 
+          NOTION_DATABASE_ID: $ secrets.NOTION_DATABASE_ID 
+        run: node index.js
