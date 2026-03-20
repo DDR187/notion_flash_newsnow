@@ -25,8 +25,7 @@ function makeDedupeKey(source, link) {
 async function fetchHtml(url) {
   const res = await fetch(url, {
     headers: {
-      "user-agent":
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
       "accept-language": "zh-CN,zh;q=0.9,en;q=0.8"
     }
   });
@@ -35,16 +34,16 @@ async function fetchHtml(url) {
 }
 
 function parseFirstImageUrl($) {
-  const img = $("img").first();
-  const src = img.attr("src") || img.attr("data-src");
+  const img = $('img').first();
+  const src = img.attr('src') || img.attr('data-src');
   if (!src) return null;
-  if (src.startsWith("//")) return "https:" + src;
+  if (src.startsWith('//')) return 'https:' + src;
   return src;
 }
 
 function pickTextSnippet(text, maxLen = 200) {
-  const t = text.replace(/\s+/g, " ").trim();
-  return t.length > maxLen ? t.slice(0, maxLen) + "…" : t;
+  const t = text.replace(/\s+/g, ' ').trim();
+  return t.length > maxLen ? t.slice(0, maxLen) + '…' : t;
 }
 
 async function extractLatest(sourceName, url) {
@@ -52,11 +51,11 @@ async function extractLatest(sourceName, url) {
   const $ = cheerio.load(html);
   const imgUrl = parseFirstImageUrl($);
 
-  const pageText = $("body").text() || "";
-  const cleaned = pageText.replace(/\r/g, "").replace(/[ \t]+/g, " ").trim();
+  const pageText = $('body').text() || '';
+  const cleaned = pageText.replace(/\r/g, '').replace(/[ \t]+/g, ' ').trim();
 
   const firstLine = cleaned
-    .split("\n")
+    .split('\n')
     .map(s => s.trim())
     .filter(Boolean)[0];
 
@@ -93,7 +92,7 @@ async function createNotionRow(item) {
 
   const contentLines = [
     item.summary,
-    item.imageUrl ? `图片：${item.imageUrl}` : "",
+    item.imageUrl ? `图片：${item.imageUrl}` : '',
     `原文：${item.link}`
   ].filter(Boolean);
 
@@ -135,6 +134,3 @@ async function main() {
       console.error(`[ERR] ${s.name}`, e.message);
     }
   }
-}
-
-main();
