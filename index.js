@@ -134,3 +134,6 @@ async function main() {
       console.error(`[ERR] ${s.name}`, e.message);
     }
   }
+}
+
+main();
