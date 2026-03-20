@@ -43,10 +43,7 @@ function parseFirstImageUrl($) {
   return src;
 }
 
-function pickTextSnippet(text, maxLen = 200) {
-  const t = text.replace(/\s+/g, ' ').trim();
-  return t.length > maxLen ? t.slice(0, maxLen) + '…' : t;
-}
+
 
 async function extractLatest(sourceName, url) {
   if (sourceName === "华尔街见闻") return extractWallstreetcn(url)
