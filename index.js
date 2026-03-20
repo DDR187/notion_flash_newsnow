@@ -18,8 +18,10 @@ const SOURCES = [
   { name: "华尔街见闻", url: "https://wallstreetcn.com/live" }
 ];
 
-function makeDedupeKey(source, link) {
-  return `${source}|${link}`;
+function makeDedupeKey(item) {
+  // 精确到分钟，避免同一来源的入口页链接相同而无法新增
+  const minute = item.publishedIso.slice(0, 16) // YYYY-MM-DDTHH:MM
+  return `${item.source}|${minute}|${item.title}`
 }
 
 async function fetchHtml(url) {
@@ -47,32 +49,12 @@ function pickTextSnippet(text, maxLen = 200) {
 }
 
 async function extractLatest(sourceName, url) {
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
-  const imgUrl = parseFirstImageUrl($);
-
-  const pageText = $('body').text() || '';
-  const cleaned = pageText.replace(/\r/g, '').replace(/[ \t]+/g, ' ').trim();
-
-  const firstLine = cleaned
-    .split('\n')
-    .map(s => s.trim())
-    .filter(Boolean)[0];
-
-  const title = (firstLine || `${sourceName} 最新快讯`).slice(0, 80);
-  const summary = pickTextSnippet(cleaned, 200);
-
-  // 基础版：先用入口页作为原文链接（跑通后再升级到每条快讯详情链接）
-  const link = url;
-
-  return {
-    source: sourceName,
-    title,
-    summary,
-    link,
-    imageUrl: imgUrl,
-    publishedIso: new Date().toISOString()
-  };
+  if (sourceName === "华尔街见闻") return extractWallstreetcn(url)
+  if (sourceName === "财联社") return extractCls(url)
+  if (sourceName === "36氪") return extract36kr(url)
+  if (sourceName === "金十数据") return extractJin10(url)
+  if (sourceName === "格隆汇") return extractGelonhui(url)
+  throw new Error("Unknown source: " + sourceName)
 }
 
 async function notionHasDedupeKey(dedupeKey) {
@@ -88,7 +70,7 @@ async function notionHasDedupeKey(dedupeKey) {
 }
 
 async function createNotionRow(item) {
-  const dedupeKey = makeDedupeKey(item.source, item.link);
+  const dedupeKey = makeDedupeKey(item)
 
   const contentLines = [
     item.summary,
@@ -121,7 +103,7 @@ async function main() {
   for (const s of SOURCES) {
     try {
       const item = await extractLatest(s.name, s.url);
-      const dedupeKey = makeDedupeKey(item.source, item.link);
+      const dedupeKey = makeDedupeKey(item)
 
       if (await notionHasDedupeKey(dedupeKey)) {
         console.log(`[SKIP] ${item.source} exists: ${dedupeKey}`);
