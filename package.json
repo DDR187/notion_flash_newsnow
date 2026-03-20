@@ -1,20 +1,11 @@
-
 {
-
-"name": "notion-flash-crawler",
-
-"version": "1.0.0",
-
-"private": true,
-
-"type": "module",
-
-"dependencies": {
-
-"@notionhq/client": "^2.2.15",
-
-"cheerio": "^1.0.0"
-
-}
-
+  "name": "notion-flash-crawler",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@notionhq/client": "^2.2.15",
+    "cheerio": "^1.0.0-rc.12",
+    "node-fetch": "^3.3.2"
+  }
 }
