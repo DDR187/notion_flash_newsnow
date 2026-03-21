@@ -136,7 +136,7 @@ async function extractWallstreetcn(liveUrl) {
 
   const link = id ? `{{https://wallstreetcn.com/livenews/${id}}}` : liveUrl;
   const summary = finalizeItem("华尔街见闻", raw);
-
+  console.log("[DBG] wscn id:", id, "blockTextLen:", blockText.length)
   return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
 }
 
