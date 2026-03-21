@@ -15,7 +15,8 @@ const SOURCES = [
   { name: "格隆汇", url: "https://m.gelonghui.com/live" },
   { name: "36氪", url: "https://www.36kr.com/newsflashes" },
   { name: "财联社", url: "https://m.cls.cn/telegraph" },
-  { name: "华尔街见闻", url: "https://wallstreetcn.com/live" },
+  // V6：改用 global 入口
+  { name: "华尔街见闻", url: "https://wallstreetcn.com/live/global" },
 ];
 
 function makeDedupeKey(item) {
@@ -43,19 +44,10 @@ function pickTextSnippet(text, maxLen = 200) {
 function isNoise(s) {
   const t = String(s || "").trim();
   if (!t) return true;
-
-  // 空壳（比如“（华尔街见闻）”）
   if (/^（[^）]+）$/.test(t)) return true;
-
-  // 常见脚本/埋点/配置
   if (/^(\/\/|window\.|function\s|gtag\(|dataLayer\b|_hmt\b)/i.test(t)) return true;
-
-  // 常见误抓
   if (t === "快讯" || t === "账号设置" || t.length < 4) return true;
-
-  // 导航/频道堆叠
   if (t.length > 300 && /(登录|搜索|账号设置|城市合作|企业服务|关于36氪)/.test(t)) return true;
-
   return false;
 }
 
@@ -64,7 +56,6 @@ function parseIsoInChina(t) {
   const year = now.getFullYear();
   if (!t) return now.toISOString();
   const s = String(t).trim();
-
   if (/^20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(s)) return new Date(s.replace(" ", "T") + "+08:00").toISOString();
   if (/^\d{2}-\d{2}\s+\d{2}:\d{2}/.test(s)) {
     const [md, hm] = s.split(/\s+/);
@@ -102,47 +93,42 @@ function cleanWscn(raw) {
   return t;
 }
 
-async function extractWallstreetcn(url) {
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
+async function extractWallstreetcn(liveUrl) {
+  const liveHtml = await fetchHtml(liveUrl);
 
-  const m = html.match(/livenews\/edit\/(\d{6,})/);
-  const id = m ? m[1] : null;
+  // 先找 edit id
+  let id = null;
+  const m1 = liveHtml.match(/livenews\/edit\/(\d{6,})/);
+  if (m1) id = m1[1];
+
+  // 再兜底：找详情 id
+  if (!id) {
+    const m2 = liveHtml.match(/wallstreetcn\.com\/livenews\/(\d{6,})/);
+    if (m2) id = m2[1];
+  }
+
   const detailUrl = id ? `https://wallstreetcn.com/livenews/${id}` : null;
-  const link = detailUrl || url;
+  const link = detailUrl || liveUrl;
 
-  let text = "";
-  if (id) {
-    const a = $(`a[href*="livenews/edit/${id}"]`).first();
-    const container = a.closest("li, div");
-    text = container.text() || a.parent().text() || "";
-  }
-  if (!text) {
-    const a0 = $("a[href*='livenews/edit']").first();
-    text = a0.closest("li, div").text() || a0.parent().text() || "";
-  }
-
-  text = cleanWscn(text);
-  const cleaned = pickTextSnippet(text, 260);
-
-  const timeMatch = cleaned.match(/\b\d{2}:\d{2}\b/) || html.match(/\b\d{2}:\d{2}\b/);
-  const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
-
-  let raw = cleaned;
-  const titleMatch = cleaned.match(/【([^】]{4,60})】/);
-  if (titleMatch) {
-    raw = cleaned.replace(/^[\s\S]*?】\s*/, "").trim();
-    if (!raw) raw = titleMatch[1];
-  }
-
-  // V5 核心：如果 live 页还是抓不到正文，去详情页兜底
-  if (detailUrl && (!raw || raw.length < 10 || isNoise(raw))) {
+  // V6：优先用详情页正文
+  let raw = "";
+  if (detailUrl) {
     const detailHtml = await fetchHtml(detailUrl);
     const $d = cheerio.load(detailHtml);
     const detailText = cleanWscn($d("body").text() || "");
-    const raw2 = pickTextSnippet(detailText, 260);
-    if (raw2 && raw2.length > 20) raw = raw2;
+    raw = pickTextSnippet(detailText, 260);
   }
+
+  // 如果详情页也取不到，再从 live 页抽
+  if (!raw || raw.length < 10) {
+    const $ = cheerio.load(liveHtml);
+    const a0 = $("a[href*='livenews/edit']").first();
+    raw = pickTextSnippet(cleanWscn(a0.closest("li, div").text() || a0.parent().text() || $("body").text() || ""), 260);
+  }
+
+  // 时间：从 live 页里取第一个 HH:MM（够用），或用当前时间兜底
+  const timeMatch = liveHtml.match(/\b\d{2}:\d{2}\b/);
+  const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
 
   const summary = finalizeItem("华尔街见闻", raw);
   return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
