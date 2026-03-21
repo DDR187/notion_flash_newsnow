@@ -76,29 +76,17 @@ function finalizeItem(source, raw) {
 
 function withinWindow(publishedIso) {
   const t = new Date(publishedIso).getTime();
-  const now = Date.now();
-  return now - t <= WINDOW_MINUTES * 60 * 1000;
+  return Date.now() - t <= WINDOW_MINUTES * 60 * 1000;
 }
 
 function makeDedupeKey(item) {
-  // 36氪：link 唯一
   if (item.source === "36氪") return `${item.source}|${item.link}`;
-
-  // 财联社：同一个列表页 link 不唯一，使用 time+title
-  if (item.source === "财联社") {
-    const t = (item._timeHHMM || "").trim();
-    const title = (item._title || item.summary || "").slice(0, 80);
-    return `${item.source}|${t}|${title}`;
-  }
-
-  // 格隆汇：同一个列表页 link 不唯一，用摘要前 80 字
+  if (item.source === "财联社") return `${item.source}|${item._timeHHMM || ""}|${item._title || ""}`;
   if (item.source === "格隆汇") {
     const sig = (item.summary || "").replace(/\s+/g, " ").trim().slice(0, 80);
     return `${item.source}|${sig}`;
   }
-
-  // 兜底
-  return `${item.source}|${item.link || ""}|${(item.summary || "").slice(0, 80)}`;
+  return `${item.source}|${(item.summary || "").slice(0, 80)}`;
 }
 
 async function notionHasDedupeKey(dedupeKey) {
@@ -168,6 +156,8 @@ async function extractClsItems(url) {
     });
   }
 
+  // 关键：按时间倒序，保证从新到旧
+  items.sort((a, b) => new Date(b.publishedIso).getTime() - new Date(a.publishedIso).getTime());
   return items;
 }
 
@@ -209,13 +199,7 @@ async function extract36krItems(url) {
     const summary = finalizeItem("36氪", raw);
     if (!summary || isNoise(summary)) continue;
 
-    items.push({
-      source: "36氪",
-      summary,
-      link,
-      imageUrl: null,
-      publishedIso: new Date().toISOString(),
-    });
+    items.push({ source: "36氪", summary, link, imageUrl: null, publishedIso: new Date().toISOString() });
   }
 
   return items;
@@ -238,13 +222,7 @@ async function extractGelonhuiItems(url) {
     const summary = finalizeItem("格隆汇", raw);
     if (!summary || isNoise(summary)) continue;
 
-    items.push({
-      source: "格隆汇",
-      summary,
-      link: url,
-      imageUrl: null,
-      publishedIso: new Date().toISOString(),
-    });
+    items.push({ source: "格隆汇", summary, link: url, imageUrl: null, publishedIso: new Date().toISOString() });
   }
 
   return items;
@@ -256,15 +234,17 @@ async function main() {
   for (const s of SOURCES) {
     try {
       const items = await extractItems(s.name, s.url);
-
-      // 只有财联社有靠谱时间：用 10 分钟窗口过滤
-      const candidates =
-        s.name === "财联社" ? items.filter((it) => withinWindow(it.publishedIso)) : items;
-
       let added = 0;
-      for (const item of candidates) {
+
+      for (const item of items) {
+        if (item.source === "财联社" && !withinWindow(item.publishedIso)) {
+          break; // 超窗了，后面更旧
+        }
+
         const dedupeKey = makeDedupeKey(item);
-        if (await notionHasDedupeKey(dedupeKey)) continue;
+        if (await notionHasDedupeKey(dedupeKey)) {
+          break; // 关键：遇到已存在就停止（真正增量）
+        }
 
         await createNotionRow(item);
         added += 1;
