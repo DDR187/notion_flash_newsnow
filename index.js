@@ -43,10 +43,24 @@ function pickTextSnippet(text, maxLen = 200) {
 function isNoise(s) {
   const t = String(s || "").trim();
   if (!t) return true;
+
+  // 空壳
   if (/^（[^）]+）$/.test(t)) return true;
+
+  // 脚本/埋点
   if (/^(\/\/|window\.|function\s|gtag\(|dataLayer\b|_hmt\b)/i.test(t)) return true;
+
+  // SVG/path（你这次金十写进来的就是这个）
+  if (/<path\s+d=|\bd=\"M\d+\.|\bd=\'M\d+\./i.test(t)) return true;
+
+  // 常见 UI 误抓
+  if (/(分享|收藏|详情|重置密码|操作Q&A)/.test(t) && t.length < 60) return true;
+
   if (t === "快讯" || t === "账号设置" || t.length < 4) return true;
+
+  // 导航/频道堆叠
   if (t.length > 300 && /(登录|搜索|账号设置|城市合作|企业服务|关于36氪)/.test(t)) return true;
+
   return false;
 }
 
@@ -115,7 +129,7 @@ async function extract36kr(url) {
 
   const m = html.match(/href=\"(\/newsflashes\/\d+)\"/);
   const path = m ? m[1] : null;
-  const link = path ? `https://www.36kr.com${path}` : url;
+  const link = path ? `{{https://www.36kr.com${path}}}` : url;
 
   let raw = "";
   if (path) {
@@ -172,33 +186,35 @@ function stripTags(s) {
 async function extractJin10(url) {
   const html = await fetchHtml(url);
 
-  // 1) 先从 HTML 找第一条时间戳
   const tm = html.match(/\b(\d{2}:\d{2}:\d{2})\b/);
   const time = tm ? tm[1] : null;
 
   let candidate = "";
 
   if (time) {
-    // 2) 从时间戳之后截一段，去标签后找第一句中文
     const pos = html.indexOf(time);
-    const slice = pos >= 0 ? html.slice(pos, pos + 5000) : html.slice(0, 5000);
+    const slice = pos >= 0 ? html.slice(pos, pos + 6000) : html.slice(0, 6000);
     const plain = stripTags(slice);
-
-    // 去掉时间本身
     const plain2 = plain.replace(time, " ").trim();
 
-    // 找第一段包含中文的句子
+    // 先按句号等分段
     const parts = plain2.split(/(?<=[。！!？?])/);
-    candidate = parts.find((p) => /[\u4e00-\u9fa5]/.test(p) && p.length >= 10 && p.length <= 220) || "";
+    candidate =
+      parts.find(
+        (p) => /[\u4e00-\u9fa5]/.test(p) && p.length >= 10 && p.length <= 220 && !isNoise(p)
+      ) || "";
 
-    // 如果分句没找到，就退回到前 220 字
+    // 仍然没找到就退回到前 220 字（但必须含中文且不是噪音）
     if (!candidate && /[\u4e00-\u9fa5]/.test(plain2)) {
-      candidate = pickTextSnippet(plain2, 220);
+      const tmp = pickTextSnippet(plain2, 220);
+      if (!isNoise(tmp) && /[\u4e00-\u9fa5]/.test(tmp)) candidate = tmp;
     }
   }
 
-  // 3) 最后兜底：明确写入失败原因（避免 SKIP）
-  if (!candidate || isNoise(candidate) || !/[\\u4e00-\\u9fa5]/.test(candidate)) { candidate = "金十正文抓取失败..." }
+  // 最后兜底：明确失败原因（避免写入 UI/SVG）
+  if (!candidate || isNoise(candidate) || !/[\u4e00-\u9fa5]/.test(candidate)) {
+    candidate = "金十正文抓取失败：入口页返回内容疑似脚本/空壳（可能反爬或前端渲染）。";
+  }
 
   const summary = finalizeItem("金十数据", candidate);
 
