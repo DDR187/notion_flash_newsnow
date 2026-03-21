@@ -15,8 +15,7 @@ const SOURCES = [
   { name: "格隆汇", url: "https://m.gelonghui.com/live" },
   { name: "36氪", url: "https://www.36kr.com/newsflashes" },
   { name: "财联社", url: "https://m.cls.cn/telegraph" },
-  // V9：华尔街见闻不再用网页，url 只是占位
-  { name: "华尔街见闻", url: "wscn_api" },
+  { name: "华尔街见闻", url: "https://wallstreetcn.com/live/global" },
 ];
 
 function makeDedupeKey(item) {
@@ -24,32 +23,18 @@ function makeDedupeKey(item) {
   return `${item.source}|${minute}|${item.summary}`;
 }
 
-async function fetchHtml(url) {
+async function fetchHtml(url, extraHeaders = {}) {
   const res = await fetch(url, {
     headers: {
       "user-agent":
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      ...extraHeaders,
     },
   });
   if (!res.ok) throw new Error(`Fetch failed ${res.status} ${url}`);
   return await res.text();
-}
-
-async function fetchJson(url) {
-  const res = await fetch(url, {
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-      "accept": "application/json,text/plain,*/*",
-      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-      "origin": "https://wallstreetcn.com",
-      "referer": "https://wallstreetcn.com/",
-    },
-  });
-  if (!res.ok) throw new Error(`Fetch json failed ${res.status} ${url}`);
-  return await res.json();
 }
 
 function pickTextSnippet(text, maxLen = 200) {
@@ -95,7 +80,7 @@ function finalizeItem(source, raw) {
 }
 
 async function extractLatest(sourceName, url) {
-  if (sourceName === "华尔街见闻") return extractWallstreetcnApi();
+  if (sourceName === "华尔街见闻") return extractWallstreetcn(url);
   if (sourceName === "财联社") return extractCls(url);
   if (sourceName === "36氪") return extract36kr(url);
   if (sourceName === "金十数据") return extractJin10(url);
@@ -103,33 +88,77 @@ async function extractLatest(sourceName, url) {
   throw new Error("Unknown source: " + sourceName);
 }
 
-// V9：华尔街见闻 API（global）
-async function extractWallstreetcnApi() {
-  // 该接口在多数环境下比网页稳定（网页是前端渲染，Actions 里可能拿不到内容）
-  const api = "https://api-one-wscn.awtmt.com/apiv1/content/livenews?channel=global&limit=1";
-  const data = await fetchJson(api);
-
-  // 兼容不同返回结构
-  const item = data?.data?.items?.[0] || data?.data?.[0] || data?.items?.[0];
-  const title = item?.title || "";
-  const content = item?.content_text || item?.content || "";
-  const id = item?.id || item?.news_id || "";
-  const ts = item?.display_time || item?.created_at || item?.time || "";
-
-  const raw = (title ? `【${title}】` : "") + (content ? ` ${content}` : "");
-  const summary = finalizeItem("华尔街见闻", raw);
-
-  // 时间：如果 api 给的是秒级时间戳
-  let publishedIso = new Date().toISOString();
-  if (typeof ts === "number") publishedIso = new Date(ts * 1000).toISOString();
-  else if (typeof ts === "string" && /\d{2}:\d{2}/.test(ts)) publishedIso = parseIsoInChina(ts.match(/\d{2}:\d{2}/)[0]);
-
-  const link = id ? `{{https://wallstreetcn.com/livenews/${id}}}` : "https://wallstreetcn.com/live/global";
-  console.log("[DBG] hasJuicy:", liveHtml.includes("juicy.wscn.net/livenews/edit/"))
-  return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
+function cleanWscnText(raw) {
+  let t = String(raw || "");
+  t = t.replace(/参与评论|收藏|微信|微博|展开|设置|声音提醒|桌面提示|语音播报|夜间模式/g, " ");
+  t = t.replace(/\s+/g, " ").trim();
+  return t;
 }
 
-// ---- 下面保持你 V8 的其余来源逻辑 ----
+async function extractWallstreetcn(liveUrl) {
+  // 1) 先尝试直连 live/global
+  let liveHtml = "";
+  try {
+    liveHtml = await fetchHtml(liveUrl, {
+      referer: "https://wallstreetcn.com/",
+      origin: "https://wallstreetcn.com",
+    });
+  } catch (e) {
+    liveHtml = "";
+  }
+
+  // 2) 若 Actions 环境拿到空壳，则 fallback 到 jina.ai（把页面转成可解析文本）
+  let htmlForParse = liveHtml;
+  if (!htmlForParse || !/juicy\.wscn\.net\/livenews\/edit\//.test(htmlForParse)) {
+    const jinaUrl = `https://r.jina.ai/${liveUrl}`;
+    htmlForParse = await fetchHtml(jinaUrl);
+  }
+
+  // 3) 从 html 中抓第一条 juicy edit id
+  const m = htmlForParse.match(/juicy\.wscn\.net\/livenews\/edit\/(\d{6,})/);
+  const id = m ? m[1] : null;
+  if (!id) {
+    // 实在拿不到就返回空，让上层 skip
+    return {
+      source: "华尔街见闻",
+      title: "",
+      summary: "",
+      link: liveUrl,
+      imageUrl: null,
+      publishedIso: new Date().toISOString(),
+    };
+  }
+
+  const juicyEditUrl = `https://juicy.wscn.net/livenews/edit/${id}`;
+
+  // 4) 直接抓 juicy 详情页（这页是服务端输出，能拿到标题+正文）
+  const detailHtml = await fetchHtml(juicyEditUrl, {
+    referer: liveUrl,
+    origin: "https://juicy.wscn.net",
+  });
+
+  const $d = cheerio.load(detailHtml);
+  let text = cleanWscnText($d("body").text() || "");
+
+  // 5) 提取【标题】后的正文；如果没有【】就取前 260 字
+  let raw = "";
+  const tmatch = text.match(/【([^】]{4,80})】/);
+  if (tmatch) {
+    raw = text.replace(/^[\s\S]*?】\s*/, "").trim();
+    if (!raw) raw = tmatch[1];
+  } else {
+    raw = text;
+  }
+
+  // 6) 时间：优先从 live/global 的文本里取 HH:MM
+  const timeMatch = htmlForParse.match(/\b\d{2}:\d{2}\b/);
+  const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
+
+  const link = `{{https://wallstreetcn.com/livenews/${id}}}`;
+  const summary = finalizeItem("华尔街见闻", raw);
+
+  return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
+}
 
 async function extractCls(url) {
   const html = await fetchHtml(url);
