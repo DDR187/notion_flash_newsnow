@@ -10,8 +10,8 @@ if (!process.env.NOTION_TOKEN || !databaseId) {
   process.exit(1);
 }
 
+// 三个来源：格隆汇 / 36氪 / 财联社
 const SOURCES = [
-  { name: "金十数据", url: "https://flash.jin10.com" },
   { name: "格隆汇", url: "https://m.gelonghui.com/live" },
   { name: "36氪", url: "https://www.36kr.com/newsflashes" },
   { name: "财联社", url: "https://m.cls.cn/telegraph" },
@@ -43,30 +43,10 @@ function pickTextSnippet(text, maxLen = 200) {
 function isNoise(s) {
   const t = String(s || "").trim();
   if (!t) return true;
-
-  // 空壳
   if (/^（[^）]+）$/.test(t)) return true;
-
-  // 脚本/埋点
   if (/^(\/\/|window\.|function\s|gtag\(|dataLayer\b|_hmt\b)/i.test(t)) return true;
-
-  // HTML/Vue 模板片段（你最新金十写进来的就是这种）
-  if (/[<>]/.test(t) && /<\/?\w+/.test(t)) return true;
-  if (/\bdata-v-\w+/i.test(t)) return true;
-  if (/\bcollapse-\w+/i.test(t)) return true;
-  if (/\bclass=/.test(t)) return true;
-
-  // SVG/path
-  if (/<path\s+d=|\bd=\"M\d+\.|\bd=\'M\d+\./i.test(t)) return true;
-
-  // 常见 UI 误抓
-  if (/(分享|收藏|详情|复制|重置密码|操作Q&A)/.test(t) && t.length < 80) return true;
-
   if (t === "快讯" || t === "账号设置" || t.length < 4) return true;
-
-  // 导航/频道堆叠
   if (t.length > 300 && /(登录|搜索|账号设置|城市合作|企业服务|关于36氪)/.test(t)) return true;
-
   return false;
 }
 
@@ -100,7 +80,6 @@ function finalizeItem(source, raw) {
 async function extractLatest(sourceName, url) {
   if (sourceName === "财联社") return extractCls(url);
   if (sourceName === "36氪") return extract36kr(url);
-  if (sourceName === "金十数据") return extractJin10(url);
   if (sourceName === "格隆汇") return extractGelonhui(url);
   throw new Error("Unknown source: " + sourceName);
 }
@@ -111,19 +90,32 @@ async function extractCls(url) {
   const text = $("body").text() || "";
   const lines = text.split(/\n/).map((s) => s.trim()).filter(Boolean);
 
+  // 方案1：标准电报行
   let first = lines.find((l) => /^\d{2}:\d{2}【.+?】/.test(l)) || "";
+
+  // 方案2：从整页抓 HH:MM【】附近
   if (!first) {
-    const m = text.match(/\b\d{2}:\d{2}【[^】]+】[\s\S]{0,260}/);
+    const m = text.match(/\b\d{2}:\d{2}【[^】]+】[\s\S]{0,320}/);
     first = m ? m[0] : "";
   }
 
-  const time = (first.match(/^(\d{2}:\d{2})/) || [])[1] || null;
+  // 方案3：页面结构变化时，抓第一个 HH:MM 后面一段中文
+  if (!first) {
+    const m2 = text.match(/\b\d{2}:\d{2}\b[\s\S]{0,260}/);
+    first = m2 ? m2[0] : "";
+  }
 
-  let raw = first;
+  const time = (first.match(/\b(\d{2}:\d{2})\b/) || [])[1] || null;
+
+  let raw = first || "";
   raw = raw.split("阅")[0];
-  raw = raw.split(/\b\d{2}:\d{2}【/)[0];
-
   raw = raw.replace(/^\d{2}:\d{2}/, "").replace(/^【[^】]+】/, "").trim();
+  raw = raw.replace(/\s+/g, " ").trim();
+
+  // 仍然没正文：写入失败原因（避免 silent skip）
+  if (!raw || isNoise(raw) || !/[\u4e00-\u9fa5]/.test(raw)) {
+    raw = "财联社正文抓取失败：页面结构可能变更或返回空壳。";
+  }
 
   const summary = finalizeItem("财联社", raw);
   return { source: "财联社", title: summary, summary, link: url, imageUrl: null, publishedIso: parseIsoInChina(time) };
@@ -173,72 +165,7 @@ async function extractGelonhui(url) {
 
   raw = raw.replace(/\s+/g, " ").trim();
   const summary = finalizeItem("格隆汇", raw);
-
   return { source: "格隆汇", title: summary, summary, link: url, imageUrl: null, publishedIso: new Date().toISOString() };
-}
-
-function stripTags(s) {
-  return String(s || "")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&quot;/g, '"')
-    .replace(/&amp;/g, "&")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-async function extractJin10(url) {
-  const html = await fetchHtml(url);
-
-  const tm = html.match(/\b(\d{2}:\d{2}:\d{2})\b/);
-  const time = tm ? tm[1] : null;
-
-  let candidate = "";
-
-  if (time) {
-    const pos = html.indexOf(time);
-    const slice = pos >= 0 ? html.slice(pos, pos + 9000) : html.slice(0, 9000);
-
-    // 去标签
-    const plain = stripTags(slice);
-    const plain2 = plain.replace(time, " ").trim();
-
-    // 句子级筛选：必须有中文、长度合理、且不包含模板特征
-    const parts = plain2.split(/(?<=[。！!？?])/);
-    candidate =
-      parts.find((p) => {
-        const s = p.trim();
-        if (!/[\u4e00-\u9fa5]/.test(s)) return false;
-        if (s.length < 10 || s.length > 220) return false;
-        if (isNoise(s)) return false;
-        if (/[<>]/.test(s) || /\bdata-v-\w+/i.test(s) || /\bcollapse-\w+/i.test(s)) return false;
-        return true;
-      }) || "";
-
-    // 兜底：前 220 字，但同样要满足“中文+非噪音+非模板”
-    if (!candidate && /[\u4e00-\u9fa5]/.test(plain2)) {
-      const tmp = pickTextSnippet(plain2, 220);
-      if (!isNoise(tmp) && /[\u4e00-\u9fa5]/.test(tmp) && !/[<>]/.test(tmp) && !/\bdata-v-\w+/i.test(tmp)) {
-        candidate = tmp;
-      }
-    }
-  }
-
-  if (!candidate || isNoise(candidate) || !/[\u4e00-\u9fa5]/.test(candidate)) {
-    candidate = "金十正文抓取失败：入口页返回内容疑似脚本/空壳（可能反爬或前端渲染）。";
-  }
-
-  const summary = finalizeItem("金十数据", candidate);
-
-  const now = new Date();
-  const yyyy = String(now.getFullYear());
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const dd = String(now.getDate()).padStart(2, "0");
-  const publishedIso = parseIsoInChina(time ? `${yyyy}-${mm}-${dd} ${time}` : null);
-
-  return { source: "金十数据", title: summary, summary, link: url, imageUrl: null, publishedIso };
 }
 
 async function notionHasDedupeKey(dedupeKey) {
