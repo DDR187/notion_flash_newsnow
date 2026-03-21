@@ -10,12 +10,12 @@ if (!process.env.NOTION_TOKEN || !databaseId) {
   process.exit(1);
 }
 
+// 只保留 4 个来源
 const SOURCES = [
   { name: "金十数据", url: "https://flash.jin10.com" },
   { name: "格隆汇", url: "https://m.gelonghui.com/live" },
   { name: "36氪", url: "https://www.36kr.com/newsflashes" },
   { name: "财联社", url: "https://m.cls.cn/telegraph" },
-  { name: "华尔街见闻", url: "https://wallstreetcn.com/live/global" },
 ];
 
 function makeDedupeKey(item) {
@@ -23,15 +23,13 @@ function makeDedupeKey(item) {
   return `${item.source}|${minute}|${item.summary}`;
 }
 
-async function fetchHtml(url, extraHeaders = {}) {
+async function fetchHtml(url) {
   const res = await fetch(url, {
-    redirect: "follow",
     headers: {
       "user-agent":
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
       accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-      ...extraHeaders,
     },
   });
   if (!res.ok) throw new Error(`Fetch failed ${res.status} ${url}`);
@@ -81,87 +79,11 @@ function finalizeItem(source, raw) {
 }
 
 async function extractLatest(sourceName, url) {
-  if (sourceName === "华尔街见闻") return extractWallstreetcn(url);
   if (sourceName === "财联社") return extractCls(url);
   if (sourceName === "36氪") return extract36kr(url);
   if (sourceName === "金十数据") return extractJin10(url);
   if (sourceName === "格隆汇") return extractGelonhui(url);
   throw new Error("Unknown source: " + sourceName);
-}
-
-function cleanWscnText(raw) {
-  let t = String(raw || "");
-  t = t.replace(/参与评论|收藏|微信|微博|展开|设置|声音提醒|桌面提示|语音播报|夜间模式/g, " ");
-  t = t.replace(/\s+/g, " ").trim();
-  return t;
-}
-
-async function extractWallstreetcn(liveUrl) {
-  // 多套 headers 轮询，尽量拿到含 juicy edit 的 HTML
-  const headerProfiles = [
-    { referer: "https://wallstreetcn.com/", origin: "https://wallstreetcn.com" },
-    {
-      referer: "https://wallstreetcn.com/live/global",
-      origin: "https://wallstreetcn.com",
-      "user-agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17 Safari/605.1.15",
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    },
-    {
-      referer: "https://wallstreetcn.com/",
-      origin: "https://wallstreetcn.com",
-      "user-agent":
-        "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Mobile Safari/537.36",
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    },
-  ];
-
-  let html = "";
-  for (const hp of headerProfiles) {
-    try {
-      html = await fetchHtml(liveUrl, hp);
-      if (/juicy\.wscn\.net\/livenews\/edit\//.test(html) || /livenews\/edit\/(\d{6,})/.test(html)) break;
-    } catch (e) {
-      // try next
-    }
-  }
-
-  if (!html) throw new Error("wscn live/global fetch returned empty html");
-
-  // 抓第一条 editId（优先带 juicy 域名的，其次任意 livenews/edit）
-  const m1 = html.match(/juicy\.wscn\.net\/livenews\/edit\/(\d{6,})/);
-  const m2 = html.match(/livenews\/edit\/(\d{6,})/);
-  const id = (m1 && m1[1]) || (m2 && m2[1]) || null;
-
-  if (!id) {
-    throw new Error("wscn live/global html has no livenews/edit id (maybe JS-rendered/anti-bot)");
-  }
-
-  const juicyEditUrl = `https://juicy.wscn.net/livenews/edit/${id}`;
-  const detailHtml = await fetchHtml(juicyEditUrl, {
-    referer: liveUrl,
-    origin: "https://juicy.wscn.net",
-  });
-
-  const $d = cheerio.load(detailHtml);
-  const text = cleanWscnText($d("body").text() || "");
-
-  let raw = "";
-  const tmatch = text.match(/【([^】]{4,80})】/);
-  if (tmatch) {
-    raw = text.replace(/^[\s\S]*?】\s*/, "").trim();
-    if (!raw) raw = tmatch[1];
-  } else {
-    raw = text;
-  }
-
-  const timeMatch = html.match(/\b\d{2}:\d{2}\b/);
-  const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
-
-  const link = `{{https://wallstreetcn.com/livenews/${id}}}`;
-  const summary = finalizeItem("华尔街见闻", raw);
-
-  return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
 }
 
 async function extractCls(url) {
@@ -170,19 +92,26 @@ async function extractCls(url) {
   const text = $("body").text() || "";
   const lines = text.split(/\n/).map((s) => s.trim()).filter(Boolean);
 
-  const first = lines.find((l) => /^\d{2}:\d{2}【.+?】/.test(l)) || "";
-  const time = (first.match(/^(\d{2}:\d{2})/) || [])[1] || null;
-
-  let raw = first || "";
-  if (!raw) {
-    const m = text.match(/\b\d{2}:\d{2}【[^】]+】[\s\S]{0,240}/);
-    raw = m ? m[0] : "";
+  // 必须是电报行：HH:MM【标题】正文...
+  let first = lines.find((l) => /^\d{2}:\d{2}【.+?】/.test(l)) || "";
+  if (!first) {
+    const m = text.match(/\b\d{2}:\d{2}【[^】]+】[\s\S]{0,260}/);
+    first = m ? m[0] : "";
   }
 
-  raw = raw.split("阅")[0];
-  raw = raw.replace(/^\d{2}:\d{2}/, "").replace(/^【[^】]+】/, "").trim();
+  const time = (first.match(/^(\d{2}:\d{2})/) || [])[1] || null;
 
-  const summary = finalizeItem("财联社", raw || "");
+  // 截断：到“阅”或下一条时间出现前
+  let raw = first;
+  raw = raw.split("阅")[0];
+  raw = raw.split(/\b\d{2}:\d{2}【/)[0];
+
+  raw = raw
+    .replace(/^\d{2}:\d{2}/, "")
+    .replace(/^【[^】]+】/, "")
+    .trim();
+
+  const summary = finalizeItem("财联社", raw);
   return { source: "财联社", title: summary, summary, link: url, imageUrl: null, publishedIso: parseIsoInChina(time) };
 }
 
@@ -192,7 +121,7 @@ async function extract36kr(url) {
 
   const m = html.match(/href=\"(\/newsflashes\/\d+)\"/);
   const path = m ? m[1] : null;
-  const link = path ? `{{https://www.36kr.com${path}}}` : url;
+  const link = path ? `https://www.36kr.com${path}` : url;
 
   let raw = "";
   if (path) {
@@ -216,6 +145,31 @@ async function extract36kr(url) {
   return { source: "36氪", title: summary, summary, link, imageUrl: null, publishedIso: new Date().toISOString() };
 }
 
+async function extractGelonhui(url) {
+  const html = await fetchHtml(url);
+  const $ = cheerio.load(html);
+  const bodyText = $("body").text() || "";
+
+  // 抓第一条“格隆汇X月X日｜...”
+  const m = bodyText.match(/格隆汇\d{1,2}月\d{1,2}日｜[\s\S]{0,900}/);
+  let raw = m ? m[0] : bodyText;
+
+  // 截断标记
+  raw = raw.split("阅读")[0];
+  raw = raw.split("下一页")[0];
+  raw = raw.split("查看更多")[0];
+  raw = raw.split("")[0];
+
+  // 第二条出现就截断
+  const m2 = raw.slice(10).match(/格隆汇\d{1,2}月\d{1,2}日｜/);
+  if (m2 && m2.index != null) raw = raw.slice(0, m2.index + 10);
+
+  raw = raw.replace(/\s+/g, " ").trim();
+  const summary = finalizeItem("格隆汇", raw);
+
+  return { source: "格隆汇", title: summary, summary, link: url, imageUrl: null, publishedIso: new Date().toISOString() };
+}
+
 async function extractJin10(url) {
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
@@ -234,14 +188,16 @@ async function extractJin10(url) {
     const line = lines[i];
     if (isNoise(line)) continue;
     if (!/[\u4e00-\u9fa5]/.test(line)) continue;
-    if (/(查看更多|扫码|订阅|登录|APP|下载|设置|桌面通知|声音提示|字体大小|内容筛选|恢复默认)/.test(line)) continue;
+    if (/(查看更多|扫码|订阅|登录|APP|下载|设置|桌面通知|声音提示|字体大小|内容筛选|恢复默认|金十数据APP)/.test(line)) continue;
     if (line.length < 10 || line.length > 220) continue;
+    if (/^(重要事件|市场快讯|VIP快讯|分类|推荐阅读)$/.test(line)) continue;
     candidate = line;
     break;
   }
 
+  // HTML 兜底：从 time 后抓一段中文
   if (!candidate) {
-    const m2 = html.match(/\b\d{2}:\d{2}:\d{2}\b[\s\S]{0,40}?[\u4e00-\u9fa5][\s\S]{0,120}/);
+    const m2 = html.match(/\b\d{2}:\d{2}:\d{2}\b[\s\S]{0,50}?[\u4e00-\u9fa5][\s\S]{0,160}/);
     if (m2) candidate = m2[0].replace(/^\d{2}:\d{2}:\d{2}/, "").trim();
   }
 
@@ -253,29 +209,6 @@ async function extractJin10(url) {
   const publishedIso = parseIsoInChina(time ? `${yyyy}-${mm}-${dd} ${time}` : null);
 
   return { source: "金十数据", title: summary, summary, link: url, imageUrl: null, publishedIso };
-}
-
-async function extractGelonhui(url) {
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
-  const bodyText = $("body").text() || "";
-
-  const m = bodyText.match(/格隆汇\d{1,2}月\d{1,2}日｜[\s\S]{0,900}/);
-  let raw = m ? m[0] : bodyText;
-
-  raw = raw
-    .split("阅读")[0]
-    .split("下一页")[0]
-    .split("查看更多")[0]
-    .split("")[0]
-    .replace(/\s+/g, " ")
-    .trim();
-
-  const m2 = raw.slice(10).match(/格隆汇\d{1,2}月\d{1,2}日｜/);
-  if (m2 && m2.index != null) raw = raw.slice(0, m2.index + 10);
-
-  const summary = finalizeItem("格隆汇", raw);
-  return { source: "格隆汇", title: summary, summary, link: url, imageUrl: null, publishedIso: new Date().toISOString() };
 }
 
 async function notionHasDedupeKey(dedupeKey) {
