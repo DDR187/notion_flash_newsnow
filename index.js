@@ -15,7 +15,8 @@ const SOURCES = [
   { name: "格隆汇", url: "https://m.gelonghui.com/live" },
   { name: "36氪", url: "https://www.36kr.com/newsflashes" },
   { name: "财联社", url: "https://m.cls.cn/telegraph" },
-  { name: "华尔街见闻", url: "https://wallstreetcn.com/live/global" },
+  // V9：华尔街见闻不再用网页，url 只是占位
+  { name: "华尔街见闻", url: "wscn_api" },
 ];
 
 function makeDedupeKey(item) {
@@ -28,11 +29,27 @@ async function fetchHtml(url) {
     headers: {
       "user-agent":
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
     },
   });
   if (!res.ok) throw new Error(`Fetch failed ${res.status} ${url}`);
   return await res.text();
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url, {
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      "accept": "application/json,text/plain,*/*",
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "origin": "https://wallstreetcn.com",
+      "referer": "https://wallstreetcn.com/",
+    },
+  });
+  if (!res.ok) throw new Error(`Fetch json failed ${res.status} ${url}`);
+  return await res.json();
 }
 
 function pickTextSnippet(text, maxLen = 200) {
@@ -43,12 +60,10 @@ function pickTextSnippet(text, maxLen = 200) {
 function isNoise(s) {
   const t = String(s || "").trim();
   if (!t) return true;
-
   if (/^（[^）]+）$/.test(t)) return true;
   if (/^(\/\/|window\.|function\s|gtag\(|dataLayer\b|_hmt\b)/i.test(t)) return true;
   if (t === "快讯" || t === "账号设置" || t.length < 4) return true;
   if (t.length > 300 && /(登录|搜索|账号设置|城市合作|企业服务|关于36氪)/.test(t)) return true;
-
   return false;
 }
 
@@ -80,7 +95,7 @@ function finalizeItem(source, raw) {
 }
 
 async function extractLatest(sourceName, url) {
-  if (sourceName === "华尔街见闻") return extractWallstreetcn(url);
+  if (sourceName === "华尔街见闻") return extractWallstreetcnApi();
   if (sourceName === "财联社") return extractCls(url);
   if (sourceName === "36氪") return extract36kr(url);
   if (sourceName === "金十数据") return extractJin10(url);
@@ -88,57 +103,33 @@ async function extractLatest(sourceName, url) {
   throw new Error("Unknown source: " + sourceName);
 }
 
-function cleanWscnBlockText(raw) {
-  let t = String(raw || "");
-  t = t.replace(/参与评论|收藏|微信|微博|展开/g, " ");
-  t = t.replace(/\s+/g, " ").trim();
-  return t;
-}
+// V9：华尔街见闻 API（global）
+async function extractWallstreetcnApi() {
+  // 该接口在多数环境下比网页稳定（网页是前端渲染，Actions 里可能拿不到内容）
+  const api = "https://api-one-wscn.awtmt.com/apiv1/content/livenews?channel=global&limit=1";
+  const data = await fetchJson(api);
 
-async function extractWallstreetcn(liveUrl) {
-  const liveHtml = await fetchHtml(liveUrl);
+  // 兼容不同返回结构
+  const item = data?.data?.items?.[0] || data?.data?.[0] || data?.items?.[0];
+  const title = item?.title || "";
+  const content = item?.content_text || item?.content || "";
+  const id = item?.id || item?.news_id || "";
+  const ts = item?.display_time || item?.created_at || item?.time || "";
 
-  // V8：先用正则拿到第一条 editId
-  const idMatch = liveHtml.match(/livenews\/edit\/(\d{6,})/);
-  const id = idMatch ? idMatch[1] : null;
-
-  const $ = cheerio.load(liveHtml);
-
-  let blockText = "";
-  if (id) {
-    // 用 id 精确定位对应链接，再找容器
-    const a = $(`a[href*="livenews/edit/${id}"]`).first();
-    const container = a.closest("li, div");
-    blockText = container.text() || a.parent().text() || "";
-  }
-
-  if (!blockText) {
-    // 兜底：找任意一个 edit 链接的容器
-    const a0 = $("a[href*='livenews/edit']").first();
-    blockText = a0.closest("li, div").text() || a0.parent().text() || "";
-  }
-
-  blockText = pickTextSnippet(cleanWscnBlockText(blockText), 800);
-
-  // 取正文：优先取【】后的内容
-  const titleMatch = blockText.match(/【([^】]{4,80})】/);
-  let raw = "";
-  if (titleMatch) {
-    raw = blockText.replace(/^[\s\S]*?】\s*/, "").trim();
-    if (!raw) raw = titleMatch[1];
-  } else {
-    raw = blockText.replace(/^\d{2}:\d{2}\s*/, "").trim();
-  }
-
-  // 时间
-  const timeMatch = blockText.match(/\b\d{2}:\d{2}\b/) || liveHtml.match(/\b\d{2}:\d{2}\b/);
-  const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
-
-  const link = id ? `{{https://wallstreetcn.com/livenews/${id}}}` : liveUrl;
+  const raw = (title ? `【${title}】` : "") + (content ? ` ${content}` : "");
   const summary = finalizeItem("华尔街见闻", raw);
-  console.log("[DBG] wscn id:", id, "blockTextLen:", blockText.length)
+
+  // 时间：如果 api 给的是秒级时间戳
+  let publishedIso = new Date().toISOString();
+  if (typeof ts === "number") publishedIso = new Date(ts * 1000).toISOString();
+  else if (typeof ts === "string" && /\d{2}:\d{2}/.test(ts)) publishedIso = parseIsoInChina(ts.match(/\d{2}:\d{2}/)[0]);
+
+  const link = id ? `{{https://wallstreetcn.com/livenews/${id}}}` : "https://wallstreetcn.com/live/global";
+
   return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
 }
+
+// ---- 下面保持你 V8 的其余来源逻辑 ----
 
 async function extractCls(url) {
   const html = await fetchHtml(url);
