@@ -50,11 +50,17 @@ function isNoise(s) {
   // 脚本/埋点
   if (/^(\/\/|window\.|function\s|gtag\(|dataLayer\b|_hmt\b)/i.test(t)) return true;
 
-  // SVG/path（你这次金十写进来的就是这个）
+  // HTML/Vue 模板片段（你最新金十写进来的就是这种）
+  if (/[<>]/.test(t) && /<\/?\w+/.test(t)) return true;
+  if (/\bdata-v-\w+/i.test(t)) return true;
+  if (/\bcollapse-\w+/i.test(t)) return true;
+  if (/\bclass=/.test(t)) return true;
+
+  // SVG/path
   if (/<path\s+d=|\bd=\"M\d+\.|\bd=\'M\d+\./i.test(t)) return true;
 
   // 常见 UI 误抓
-  if (/(分享|收藏|详情|重置密码|操作Q&A)/.test(t) && t.length < 60) return true;
+  if (/(分享|收藏|详情|复制|重置密码|操作Q&A)/.test(t) && t.length < 80) return true;
 
   if (t === "快讯" || t === "账号设置" || t.length < 4) return true;
 
@@ -129,7 +135,7 @@ async function extract36kr(url) {
 
   const m = html.match(/href=\"(\/newsflashes\/\d+)\"/);
   const path = m ? m[1] : null;
-  const link = path ? `{{https://www.36kr.com${path}}}` : url;
+  const link = path ? `https://www.36kr.com${path}` : url;
 
   let raw = "";
   if (path) {
@@ -193,25 +199,33 @@ async function extractJin10(url) {
 
   if (time) {
     const pos = html.indexOf(time);
-    const slice = pos >= 0 ? html.slice(pos, pos + 6000) : html.slice(0, 6000);
+    const slice = pos >= 0 ? html.slice(pos, pos + 9000) : html.slice(0, 9000);
+
+    // 去标签
     const plain = stripTags(slice);
     const plain2 = plain.replace(time, " ").trim();
 
-    // 先按句号等分段
+    // 句子级筛选：必须有中文、长度合理、且不包含模板特征
     const parts = plain2.split(/(?<=[。！!？?])/);
     candidate =
-      parts.find(
-        (p) => /[\u4e00-\u9fa5]/.test(p) && p.length >= 10 && p.length <= 220 && !isNoise(p)
-      ) || "";
+      parts.find((p) => {
+        const s = p.trim();
+        if (!/[\u4e00-\u9fa5]/.test(s)) return false;
+        if (s.length < 10 || s.length > 220) return false;
+        if (isNoise(s)) return false;
+        if (/[<>]/.test(s) || /\bdata-v-\w+/i.test(s) || /\bcollapse-\w+/i.test(s)) return false;
+        return true;
+      }) || "";
 
-    // 仍然没找到就退回到前 220 字（但必须含中文且不是噪音）
+    // 兜底：前 220 字，但同样要满足“中文+非噪音+非模板”
     if (!candidate && /[\u4e00-\u9fa5]/.test(plain2)) {
       const tmp = pickTextSnippet(plain2, 220);
-      if (!isNoise(tmp) && /[\u4e00-\u9fa5]/.test(tmp)) candidate = tmp;
+      if (!isNoise(tmp) && /[\u4e00-\u9fa5]/.test(tmp) && !/[<>]/.test(tmp) && !/\bdata-v-\w+/i.test(tmp)) {
+        candidate = tmp;
+      }
     }
   }
 
-  // 最后兜底：明确失败原因（避免写入 UI/SVG）
   if (!candidate || isNoise(candidate) || !/[\u4e00-\u9fa5]/.test(candidate)) {
     candidate = "金十正文抓取失败：入口页返回内容疑似脚本/空壳（可能反爬或前端渲染）。";
   }
