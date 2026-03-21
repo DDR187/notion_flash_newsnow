@@ -25,9 +25,10 @@ function makeDedupeKey(item) {
 
 async function fetchHtml(url, extraHeaders = {}) {
   const res = await fetch(url, {
+    redirect: "follow",
     headers: {
       "user-agent":
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
       accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
       ...extraHeaders,
@@ -96,51 +97,55 @@ function cleanWscnText(raw) {
 }
 
 async function extractWallstreetcn(liveUrl) {
-  // 1) 先尝试直连 live/global
-  let liveHtml = "";
-  try {
-    liveHtml = await fetchHtml(liveUrl, {
+  // 多套 headers 轮询，尽量拿到含 juicy edit 的 HTML
+  const headerProfiles = [
+    { referer: "https://wallstreetcn.com/", origin: "https://wallstreetcn.com" },
+    {
+      referer: "https://wallstreetcn.com/live/global",
+      origin: "https://wallstreetcn.com",
+      "user-agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17 Safari/605.1.15",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+    {
       referer: "https://wallstreetcn.com/",
       origin: "https://wallstreetcn.com",
-    });
-  } catch (e) {
-    liveHtml = "";
+      "user-agent":
+        "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Mobile Safari/537.36",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+  ];
+
+  let html = "";
+  for (const hp of headerProfiles) {
+    try {
+      html = await fetchHtml(liveUrl, hp);
+      if (/juicy\.wscn\.net\/livenews\/edit\//.test(html) || /livenews\/edit\/(\d{6,})/.test(html)) break;
+    } catch (e) {
+      // try next
+    }
   }
 
-  // 2) 若 Actions 环境拿到空壳，则 fallback 到 jina.ai（把页面转成可解析文本）
-  let htmlForParse = liveHtml;
-  if (!htmlForParse || !/juicy\.wscn\.net\/livenews\/edit\//.test(htmlForParse)) {
-    const jinaUrl = `https://r.jina.ai/${liveUrl}`;
-    htmlForParse = await fetchHtml(jinaUrl);
-  }
+  if (!html) throw new Error("wscn live/global fetch returned empty html");
 
-  // 3) 从 html 中抓第一条 juicy edit id
-  const m = htmlForParse.match(/juicy\.wscn\.net\/livenews\/edit\/(\d{6,})/);
-  const id = m ? m[1] : null;
+  // 抓第一条 editId（优先带 juicy 域名的，其次任意 livenews/edit）
+  const m1 = html.match(/juicy\.wscn\.net\/livenews\/edit\/(\d{6,})/);
+  const m2 = html.match(/livenews\/edit\/(\d{6,})/);
+  const id = (m1 && m1[1]) || (m2 && m2[1]) || null;
+
   if (!id) {
-    // 实在拿不到就返回空，让上层 skip
-    return {
-      source: "华尔街见闻",
-      title: "",
-      summary: "",
-      link: liveUrl,
-      imageUrl: null,
-      publishedIso: new Date().toISOString(),
-    };
+    throw new Error("wscn live/global html has no livenews/edit id (maybe JS-rendered/anti-bot)");
   }
 
   const juicyEditUrl = `https://juicy.wscn.net/livenews/edit/${id}`;
-
-  // 4) 直接抓 juicy 详情页（这页是服务端输出，能拿到标题+正文）
   const detailHtml = await fetchHtml(juicyEditUrl, {
     referer: liveUrl,
     origin: "https://juicy.wscn.net",
   });
 
   const $d = cheerio.load(detailHtml);
-  let text = cleanWscnText($d("body").text() || "");
+  const text = cleanWscnText($d("body").text() || "");
 
-  // 5) 提取【标题】后的正文；如果没有【】就取前 260 字
   let raw = "";
   const tmatch = text.match(/【([^】]{4,80})】/);
   if (tmatch) {
@@ -150,8 +155,7 @@ async function extractWallstreetcn(liveUrl) {
     raw = text;
   }
 
-  // 6) 时间：优先从 live/global 的文本里取 HH:MM
-  const timeMatch = htmlForParse.match(/\b\d{2}:\d{2}\b/);
+  const timeMatch = html.match(/\b\d{2}:\d{2}\b/);
   const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
 
   const link = `{{https://wallstreetcn.com/livenews/${id}}}`;
@@ -186,7 +190,7 @@ async function extract36kr(url) {
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
 
-  const m = html.match(/href=\"(\/newsflashes\/\d+)\"/) || html.match(/href=\"(\/newsflashes\/\d+)\"/);
+  const m = html.match(/href=\"(\/newsflashes\/\d+)\"/);
   const path = m ? m[1] : null;
   const link = path ? `{{https://www.36kr.com${path}}}` : url;
 
