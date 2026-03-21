@@ -10,7 +10,6 @@ if (!process.env.NOTION_TOKEN || !databaseId) {
   process.exit(1);
 }
 
-const WINDOW_MINUTES = 10;
 const SCAN_LIMIT = 20;
 
 const SOURCES = [
@@ -72,11 +71,6 @@ function finalizeItem(source, raw) {
   const base = pickTextSnippet(raw, 200);
   if (!base) return "";
   return `${base}（${source}）`;
-}
-
-function withinWindow(publishedIso) {
-  const t = new Date(publishedIso).getTime();
-  return Date.now() - t <= WINDOW_MINUTES * 60 * 1000;
 }
 
 function makeDedupeKey(item) {
@@ -156,7 +150,7 @@ async function extractClsItems(url) {
     });
   }
 
-  // 关键：按时间倒序，保证从新到旧
+  // 保证从新到旧
   items.sort((a, b) => new Date(b.publishedIso).getTime() - new Date(a.publishedIso).getTime());
   return items;
 }
@@ -199,7 +193,13 @@ async function extract36krItems(url) {
     const summary = finalizeItem("36氪", raw);
     if (!summary || isNoise(summary)) continue;
 
-    items.push({ source: "36氪", summary, link, imageUrl: null, publishedIso: new Date().toISOString() });
+    items.push({
+      source: "36氪",
+      summary,
+      link,
+      imageUrl: null,
+      publishedIso: new Date().toISOString(),
+    });
   }
 
   return items;
@@ -222,7 +222,13 @@ async function extractGelonhuiItems(url) {
     const summary = finalizeItem("格隆汇", raw);
     if (!summary || isNoise(summary)) continue;
 
-    items.push({ source: "格隆汇", summary, link: url, imageUrl: null, publishedIso: new Date().toISOString() });
+    items.push({
+      source: "格隆汇",
+      summary,
+      link: url,
+      imageUrl: null,
+      publishedIso: new Date().toISOString(),
+    });
   }
 
   return items;
@@ -237,13 +243,9 @@ async function main() {
       let added = 0;
 
       for (const item of items) {
-        if (item.source === "财联社" && !withinWindow(item.publishedIso)) {
-          break; // 超窗了，后面更旧
-        }
-
         const dedupeKey = makeDedupeKey(item);
         if (await notionHasDedupeKey(dedupeKey)) {
-          break; // 关键：遇到已存在就停止（真正增量）
+          break; // 真正增量：遇到已存在就停止
         }
 
         await createNotionRow(item);
