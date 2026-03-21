@@ -1,7 +1,7 @@
 name: Fetch Flashes to Notion
 on:
   schedule:
- #   - cron: "*/5 * * * *"
+   - cron: "*/5 * * * *"
   workflow_dispatch: {}
 jobs:
   run:
