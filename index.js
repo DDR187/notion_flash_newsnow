@@ -74,18 +74,31 @@ function finalizeItem(source, raw) {
   return `${base}（${source}）`;
 }
 
-function makeDedupeKey(item) {
-  // 最稳：来源 + 链接
-  if (item.link) return `${item.source}|${item.link}`;
-  // 兜底
-  const minute = item.publishedIso.slice(0, 16);
-  return `${item.source}|${minute}|${item.summary}`;
-}
-
 function withinWindow(publishedIso) {
   const t = new Date(publishedIso).getTime();
   const now = Date.now();
   return now - t <= WINDOW_MINUTES * 60 * 1000;
+}
+
+function makeDedupeKey(item) {
+  // 36氪：link 唯一
+  if (item.source === "36氪") return `${item.source}|${item.link}`;
+
+  // 财联社：同一个列表页 link 不唯一，使用 time+title
+  if (item.source === "财联社") {
+    const t = (item._timeHHMM || "").trim();
+    const title = (item._title || item.summary || "").slice(0, 80);
+    return `${item.source}|${t}|${title}`;
+  }
+
+  // 格隆汇：同一个列表页 link 不唯一，用摘要前 80 字
+  if (item.source === "格隆汇") {
+    const sig = (item.summary || "").replace(/\s+/g, " ").trim().slice(0, 80);
+    return `${item.source}|${sig}`;
+  }
+
+  // 兜底
+  return `${item.source}|${item.link || ""}|${(item.summary || "").slice(0, 80)}`;
 }
 
 async function notionHasDedupeKey(dedupeKey) {
@@ -99,7 +112,7 @@ async function notionHasDedupeKey(dedupeKey) {
 
 async function createNotionRow(item) {
   const dedupeKey = makeDedupeKey(item);
-  const contentLines = [item.summary, `原文：${item.link}`].filter(Boolean);
+  const contentLines = [item.summary, item.link ? `原文：${item.link}` : ""].filter(Boolean);
 
   await notion.pages.create({
     parent: { database_id: databaseId },
@@ -132,7 +145,6 @@ async function extractClsItems(url) {
   const $ = cheerio.load(html);
   const text = $("body").text() || "";
 
-  // 抓多条：HH:MM【标题】正文...
   const re = /(\b\d{2}:\d{2}\b)【([^】]{2,80})】([\s\S]{0,260}?)(?=\b\d{2}:\d{2}\b【|$)/g;
   const items = [];
   let m;
@@ -141,6 +153,7 @@ async function extractClsItems(url) {
     const title = m[2];
     const body = String(m[3] || "").split("阅")[0].trim();
     const raw = body || title;
+
     const summary = finalizeItem("财联社", raw);
     if (!summary || isNoise(summary)) continue;
 
@@ -150,6 +163,8 @@ async function extractClsItems(url) {
       link: url,
       imageUrl: null,
       publishedIso: parseIsoInChina(time),
+      _timeHHMM: time,
+      _title: title,
     });
   }
 
@@ -175,7 +190,7 @@ async function extract36krItems(url) {
   const items = [];
 
   for (const path of picked) {
-    const link = `https://www.36kr.com${path}`;
+    const link = `{{https://www.36kr.com${path}}}`;
     const a = $(`a[href='${path}'],a[href*='${path}']`).first();
     const container = a.closest("div");
     let raw = container.text() || a.parent().text() || "";
@@ -194,7 +209,6 @@ async function extract36krItems(url) {
     const summary = finalizeItem("36氪", raw);
     if (!summary || isNoise(summary)) continue;
 
-    // 36kr 页面上时间不稳定，这里用 now；靠 link 去重即可
     items.push({
       source: "36氪",
       summary,
@@ -212,7 +226,6 @@ async function extractGelonhuiItems(url) {
   const $ = cheerio.load(html);
   const bodyText = $("body").text() || "";
 
-  // 用“格隆汇X月X日｜”作为分隔符抓多条
   const parts = bodyText.split(/(?=格隆汇\d{1,2}月\d{1,2}日｜)/).filter(Boolean);
   const picked = parts.slice(0, SCAN_LIMIT);
   const items = [];
@@ -225,7 +238,6 @@ async function extractGelonhuiItems(url) {
     const summary = finalizeItem("格隆汇", raw);
     if (!summary || isNoise(summary)) continue;
 
-    // 格隆汇页时间字段不稳定：用 now；靠 summary+来源 去重也行，但这里优先用 link
     items.push({
       source: "格隆汇",
       summary,
@@ -244,10 +256,13 @@ async function main() {
   for (const s of SOURCES) {
     try {
       const items = await extractItems(s.name, s.url);
-      const fresh = items.filter((it) => withinWindow(it.publishedIso));
+
+      // 只有财联社有靠谱时间：用 10 分钟窗口过滤
+      const candidates =
+        s.name === "财联社" ? items.filter((it) => withinWindow(it.publishedIso)) : items;
 
       let added = 0;
-      for (const item of fresh) {
+      for (const item of candidates) {
         const dedupeKey = makeDedupeKey(item);
         if (await notionHasDedupeKey(dedupeKey)) continue;
 
