@@ -125,7 +125,7 @@ async function extractWallstreetcnApi() {
   else if (typeof ts === "string" && /\d{2}:\d{2}/.test(ts)) publishedIso = parseIsoInChina(ts.match(/\d{2}:\d{2}/)[0]);
 
   const link = id ? `{{https://wallstreetcn.com/livenews/${id}}}` : "https://wallstreetcn.com/live/global";
-
+  console.log("[DBG] hasJuicy:", liveHtml.includes("juicy.wscn.net/livenews/edit/"))
   return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
 }
 
