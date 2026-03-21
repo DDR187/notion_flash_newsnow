@@ -44,16 +44,9 @@ function isNoise(s) {
   const t = String(s || "").trim();
   if (!t) return true;
 
-  // 空壳
   if (/^（[^）]+）$/.test(t)) return true;
-
-  // 常见脚本/埋点/配置
   if (/^(\/\/|window\.|function\s|gtag\(|dataLayer\b|_hmt\b)/i.test(t)) return true;
-
-  // 常见误抓
   if (t === "快讯" || t === "账号设置" || t.length < 4) return true;
-
-  // 导航/频道堆叠
   if (t.length > 300 && /(登录|搜索|账号设置|城市合作|企业服务|关于36氪)/.test(t)) return true;
 
   return false;
@@ -95,7 +88,6 @@ async function extractLatest(sourceName, url) {
   throw new Error("Unknown source: " + sourceName);
 }
 
-// 华尔街见闻：只取 live/global 第一条快讯块（避免抓到 gtag）
 function cleanWscnBlockText(raw) {
   let t = String(raw || "");
   t = t.replace(/参与评论|收藏|微信|微博|展开/g, " ");
@@ -105,26 +97,40 @@ function cleanWscnBlockText(raw) {
 
 async function extractWallstreetcn(liveUrl) {
   const liveHtml = await fetchHtml(liveUrl);
-  const $ = cheerio.load(liveHtml);
 
-  const a = $("a[href*='juicy.wscn.net/livenews/edit/'],a[href*='livenews/edit/']").first();
-  const href = a.attr("href") || "";
-  const idMatch = href.match(/livenews\/edit\/(\d{6,})/);
+  // V8：先用正则拿到第一条 editId
+  const idMatch = liveHtml.match(/livenews\/edit\/(\d{6,})/);
   const id = idMatch ? idMatch[1] : null;
 
-  const container = a.closest("li, div");
-  let blockText = cleanWscnBlockText(container.text() || a.parent().text() || "");
-  blockText = pickTextSnippet(blockText, 600);
+  const $ = cheerio.load(liveHtml);
 
+  let blockText = "";
+  if (id) {
+    // 用 id 精确定位对应链接，再找容器
+    const a = $(`a[href*="livenews/edit/${id}"]`).first();
+    const container = a.closest("li, div");
+    blockText = container.text() || a.parent().text() || "";
+  }
+
+  if (!blockText) {
+    // 兜底：找任意一个 edit 链接的容器
+    const a0 = $("a[href*='livenews/edit']").first();
+    blockText = a0.closest("li, div").text() || a0.parent().text() || "";
+  }
+
+  blockText = pickTextSnippet(cleanWscnBlockText(blockText), 800);
+
+  // 取正文：优先取【】后的内容
   const titleMatch = blockText.match(/【([^】]{4,80})】/);
   let raw = "";
   if (titleMatch) {
-    const after = blockText.replace(/^[\s\S]*?】\s*/, "").trim();
-    raw = after || titleMatch[1];
+    raw = blockText.replace(/^[\s\S]*?】\s*/, "").trim();
+    if (!raw) raw = titleMatch[1];
   } else {
     raw = blockText.replace(/^\d{2}:\d{2}\s*/, "").trim();
   }
 
+  // 时间
   const timeMatch = blockText.match(/\b\d{2}:\d{2}\b/) || liveHtml.match(/\b\d{2}:\d{2}\b/);
   const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
 
@@ -162,7 +168,7 @@ async function extract36kr(url) {
 
   const m = html.match(/href=\"(\/newsflashes\/\d+)\"/) || html.match(/href=\"(\/newsflashes\/\d+)\"/);
   const path = m ? m[1] : null;
-  const link = path ? `https://www.36kr.com${path}` : url;
+  const link = path ? `{{https://www.36kr.com${path}}}` : url;
 
   let raw = "";
   if (path) {
