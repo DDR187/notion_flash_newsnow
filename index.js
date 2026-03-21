@@ -43,12 +43,19 @@ function pickTextSnippet(text, maxLen = 200) {
 function isNoise(s) {
   const t = String(s || "").trim();
   if (!t) return true;
+
+  // 空壳（比如“（华尔街见闻）”）
+  if (/^（[^）]+）$/.test(t)) return true;
+
+  // 常见脚本/埋点/配置
   if (/^(\/\/|window\.|function\s|gtag\(|dataLayer\b|_hmt\b)/i.test(t)) return true;
 
-  // 这条稍微放宽，避免“华尔街见闻”这种短快讯被误杀
+  // 常见误抓
   if (t === "快讯" || t === "账号设置" || t.length < 4) return true;
 
+  // 导航/频道堆叠
   if (t.length > 300 && /(登录|搜索|账号设置|城市合作|企业服务|关于36氪)/.test(t)) return true;
+
   return false;
 }
 
@@ -57,6 +64,7 @@ function parseIsoInChina(t) {
   const year = now.getFullYear();
   if (!t) return now.toISOString();
   const s = String(t).trim();
+
   if (/^20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(s)) return new Date(s.replace(" ", "T") + "+08:00").toISOString();
   if (/^\d{2}-\d{2}\s+\d{2}:\d{2}/.test(s)) {
     const [md, hm] = s.split(/\s+/);
@@ -74,6 +82,7 @@ function parseIsoInChina(t) {
 
 function finalizeItem(source, raw) {
   const base = pickTextSnippet(raw, 200);
+  if (!base) return "";
   return `${base}（${source}）`;
 }
 
@@ -86,10 +95,9 @@ async function extractLatest(sourceName, url) {
   throw new Error("Unknown source: " + sourceName);
 }
 
-// V4：华尔街见闻专用清洗，去掉“参与评论/收藏/微信/微博”等 UI 文案
 function cleanWscn(raw) {
   let t = String(raw || "");
-  t = t.replace(/参与评论|收藏|微信|微博/g, " ");
+  t = t.replace(/参与评论|收藏|微信|微博|展开|相关文章：/g, " ");
   t = t.replace(/\s+/g, " ").trim();
   return t;
 }
@@ -98,12 +106,11 @@ async function extractWallstreetcn(url) {
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
 
-  // 取第一条 livenews/edit/ID
   const m = html.match(/livenews\/edit\/(\d{6,})/);
   const id = m ? m[1] : null;
-  const link = id ? `{{https://wallstreetcn.com/livenews/${id}}}` : url;
+  const detailUrl = id ? `https://wallstreetcn.com/livenews/${id}` : null;
+  const link = detailUrl || url;
 
-  // 关键：只在包含该 id 的容器里取文本，避免整页脚本
   let text = "";
   if (id) {
     const a = $(`a[href*="livenews/edit/${id}"]`).first();
@@ -118,11 +125,9 @@ async function extractWallstreetcn(url) {
   text = cleanWscn(text);
   const cleaned = pickTextSnippet(text, 260);
 
-  // 时间：从该容器或 html 中抓 HH:MM
   const timeMatch = cleaned.match(/\b\d{2}:\d{2}\b/) || html.match(/\b\d{2}:\d{2}\b/);
   const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
 
-  // 摘要：优先取【】后的内容；没有就用 cleaned
   let raw = cleaned;
   const titleMatch = cleaned.match(/【([^】]{4,60})】/);
   if (titleMatch) {
@@ -130,14 +135,19 @@ async function extractWallstreetcn(url) {
     if (!raw) raw = titleMatch[1];
   }
 
-  // 最强兜底：如果仍然太短，就直接用标题或 cleaned
-  if (!raw || raw.length < 6) raw = cleaned;
+  // V5 核心：如果 live 页还是抓不到正文，去详情页兜底
+  if (detailUrl && (!raw || raw.length < 10 || isNoise(raw))) {
+    const detailHtml = await fetchHtml(detailUrl);
+    const $d = cheerio.load(detailHtml);
+    const detailText = cleanWscn($d("body").text() || "");
+    const raw2 = pickTextSnippet(detailText, 260);
+    if (raw2 && raw2.length > 20) raw = raw2;
+  }
 
   const summary = finalizeItem("华尔街见闻", raw);
   return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
 }
 
-// 下面 4 个来源保持你 V3 的写法（可直接沿用 V3）
 async function extractCls(url) {
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
@@ -156,7 +166,7 @@ async function extractCls(url) {
   raw = raw.split("阅")[0];
   raw = raw.replace(/^\d{2}:\d{2}/, "").replace(/^【[^】]+】/, "").trim();
 
-  const summary = finalizeItem("财联社", raw || "财联社电报");
+  const summary = finalizeItem("财联社", raw || "");
   return { source: "财联社", title: summary, summary, link: url, imageUrl: null, publishedIso: parseIsoInChina(time) };
 }
 
@@ -169,7 +179,7 @@ async function extract36kr(url) {
 
   let raw = "";
   if (m) {
-    const a = $(`a[href*="${m[1]}"]`).first();
+    const a = $(`a[href*="${m[1]}"],a[href="${m[1]}"]`).first();
     const container = a.closest("div");
     raw = container.text() || a.parent().text() || "";
   }
@@ -202,7 +212,7 @@ async function extractJin10(url) {
 
   let candidate = "";
   const start = Math.max(idx, 0);
-  const end = Math.min(lines.length, idx >= 0 ? idx + 120 : 120);
+  const end = Math.min(lines.length, idx >= 0 ? idx + 140 : 140);
   for (let i = start; i < end; i++) {
     const line = lines[i];
     if (isNoise(line)) continue;
@@ -218,7 +228,7 @@ async function extractJin10(url) {
     if (m2) candidate = m2[0].replace(/^\d{2}:\d{2}:\d{2}/, "").trim();
   }
 
-  const summary = finalizeItem("金十数据", candidate || "（未抓到有效快讯正文）");
+  const summary = finalizeItem("金十数据", candidate);
 
   const yyyy = String(new Date().getFullYear());
   const mm = String(new Date().getMonth() + 1).padStart(2, "0");
@@ -247,7 +257,7 @@ async function extractGelonhui(url) {
   const m2 = raw.slice(10).match(/格隆汇\d{1,2}月\d{1,2}日｜/);
   if (m2 && m2.index != null) raw = raw.slice(0, m2.index + 10);
 
-  const summary = finalizeItem("格隆汇", raw || "格隆汇快讯");
+  const summary = finalizeItem("格隆汇", raw);
   return { source: "格隆汇", title: summary, summary, link: url, imageUrl: null, publishedIso: new Date().toISOString() };
 }
 
