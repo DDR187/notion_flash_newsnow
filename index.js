@@ -44,7 +44,10 @@ function isNoise(s) {
   const t = String(s || "").trim();
   if (!t) return true;
   if (/^(\/\/|window\.|function\s|gtag\(|dataLayer\b|_hmt\b)/i.test(t)) return true;
-  if (t === "快讯" || t === "账号设置" || t.length < 6) return true;
+
+  // 这条稍微放宽，避免“华尔街见闻”这种短快讯被误杀
+  if (t === "快讯" || t === "账号设置" || t.length < 4) return true;
+
   if (t.length > 300 && /(登录|搜索|账号设置|城市合作|企业服务|关于36氪)/.test(t)) return true;
   return false;
 }
@@ -74,31 +77,6 @@ function finalizeItem(source, raw) {
   return `${base}（${source}）`;
 }
 
-function clean36kr(raw) {
-  let t = String(raw || "");
-  // 去掉“xx分钟前”及其后紧跟的分享 UI
-  t = t.replace(/\d+\s*分钟前/g, " ");
-  t = t.replace(/分享至/g, " ");
-  t = t.replace(/打开微信“扫一扫”[\s\S]*?分享按钮/g, " ");
-  t = t.replace(/打开微信/g, " ").replace(/扫一扫/g, " ");
-  t = t.replace(/点击屏幕右上角分享按钮/g, " ");
-  t = t.replace(/\s+/g, " ").trim();
-  return t;
-}
-
-function cleanGelonghui(raw) {
-  let t = String(raw || "");
-  // 以“阅读///下一页/查看更多/分钟”这类为分隔截断
-  t = t.split("阅读")[0];
-  t = t.split("下一页")[0];
-  t = t.split("查看更多")[0];
-  t = t.split("")[0];
-  // 如果仍包含第二条“格隆汇X月X日｜”，只保留第一条
-  const m2 = t.slice(10).match(/格隆汇\d{1,2}月\d{1,2}日｜/);
-  if (m2 && m2.index != null) t = t.slice(0, m2.index + 10);
-  return t.replace(/\s+/g, " ").trim();
-}
-
 async function extractLatest(sourceName, url) {
   if (sourceName === "华尔街见闻") return extractWallstreetcn(url);
   if (sourceName === "财联社") return extractCls(url);
@@ -108,13 +86,24 @@ async function extractLatest(sourceName, url) {
   throw new Error("Unknown source: " + sourceName);
 }
 
+// V4：华尔街见闻专用清洗，去掉“参与评论/收藏/微信/微博”等 UI 文案
+function cleanWscn(raw) {
+  let t = String(raw || "");
+  t = t.replace(/参与评论|收藏|微信|微博/g, " ");
+  t = t.replace(/\s+/g, " ").trim();
+  return t;
+}
+
 async function extractWallstreetcn(url) {
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
+
+  // 取第一条 livenews/edit/ID
   const m = html.match(/livenews\/edit\/(\d{6,})/);
   const id = m ? m[1] : null;
-  const link = id ? `https://wallstreetcn.com/livenews/${id}` : url;
+  const link = id ? `{{https://wallstreetcn.com/livenews/${id}}}` : url;
 
+  // 关键：只在包含该 id 的容器里取文本，避免整页脚本
   let text = "";
   if (id) {
     const a = $(`a[href*="livenews/edit/${id}"]`).first();
@@ -123,13 +112,17 @@ async function extractWallstreetcn(url) {
   }
   if (!text) {
     const a0 = $("a[href*='livenews/edit']").first();
-    text = a0.closest("li, div").text() || $("body").text() || "";
+    text = a0.closest("li, div").text() || a0.parent().text() || "";
   }
 
+  text = cleanWscn(text);
   const cleaned = pickTextSnippet(text, 260);
-  const timeMatch = html.match(/\b\d{2}:\d{2}\b/);
+
+  // 时间：从该容器或 html 中抓 HH:MM
+  const timeMatch = cleaned.match(/\b\d{2}:\d{2}\b/) || html.match(/\b\d{2}:\d{2}\b/);
   const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
 
+  // 摘要：优先取【】后的内容；没有就用 cleaned
   let raw = cleaned;
   const titleMatch = cleaned.match(/【([^】]{4,60})】/);
   if (titleMatch) {
@@ -137,34 +130,31 @@ async function extractWallstreetcn(url) {
     if (!raw) raw = titleMatch[1];
   }
 
+  // 最强兜底：如果仍然太短，就直接用标题或 cleaned
+  if (!raw || raw.length < 6) raw = cleaned;
+
   const summary = finalizeItem("华尔街见闻", raw);
   return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
 }
 
+// 下面 4 个来源保持你 V3 的写法（可直接沿用 V3）
 async function extractCls(url) {
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
   const text = $("body").text() || "";
   const lines = text.split(/\n/).map((s) => s.trim()).filter(Boolean);
 
-  // V3：更严格——必须是“HH:MM【标题】正文...”这一行
   const first = lines.find((l) => /^\d{2}:\d{2}【.+?】/.test(l)) || "";
   const time = (first.match(/^(\d{2}:\d{2})/) || [])[1] || null;
 
   let raw = first || "";
   if (!raw) {
-    // 兜底：在全文里找第一次出现的电报格式
     const m = text.match(/\b\d{2}:\d{2}【[^】]+】[\s\S]{0,240}/);
     raw = m ? m[0] : "";
   }
 
-  // 截断到“阅”前
   raw = raw.split("阅")[0];
-
-  raw = raw
-    .replace(/^\d{2}:\d{2}/, "")
-    .replace(/^【[^】]+】/, "")
-    .trim();
+  raw = raw.replace(/^\d{2}:\d{2}/, "").replace(/^【[^】]+】/, "").trim();
 
   const summary = finalizeItem("财联社", raw || "财联社电报");
   return { source: "财联社", title: summary, summary, link: url, imageUrl: null, publishedIso: parseIsoInChina(time) };
@@ -174,7 +164,6 @@ async function extract36kr(url) {
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
 
-  // 必须是 /newsflashes/数字ID
   const m = html.match(/href=\"(\/newsflashes\/\d+)\"/);
   const link = m ? `https://www.36kr.com${m[1]}` : url;
 
@@ -186,7 +175,16 @@ async function extract36kr(url) {
   }
   if (!raw) raw = $("body").text() || "";
 
-  raw = clean36kr(raw);
+  raw = raw
+    .replace(/\d+\s*分钟前/g, " ")
+    .replace(/分享至/g, " ")
+    .replace(/打开微信“扫一扫”[\s\S]*?分享按钮/g, " ")
+    .replace(/打开微信/g, " ")
+    .replace(/扫一扫/g, " ")
+    .replace(/点击屏幕右上角分享按钮/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
   const summary = finalizeItem("36氪", raw);
   return { source: "36氪", title: summary, summary, link, imageUrl: null, publishedIso: new Date().toISOString() };
 }
@@ -202,7 +200,6 @@ async function extractJin10(url) {
   const idx = firstTimeLine ? lines.indexOf(firstTimeLine) : -1;
   const time = firstTimeLine || null;
 
-  // V3：候选行必须“含中文 + 不是页面功能文案 + 长度合理”
   let candidate = "";
   const start = Math.max(idx, 0);
   const end = Math.min(lines.length, idx >= 0 ? idx + 120 : 120);
@@ -212,13 +209,10 @@ async function extractJin10(url) {
     if (!/[\u4e00-\u9fa5]/.test(line)) continue;
     if (/(查看更多|扫码|订阅|登录|APP|下载|设置|桌面通知|声音提示|字体大小|内容筛选|恢复默认)/.test(line)) continue;
     if (line.length < 10 || line.length > 220) continue;
-    // 排除明显“栏目标题”
-    if (/^(重要事件|市场快讯|VIP快讯|分类|推荐阅读)$/.test(line)) continue;
     candidate = line;
     break;
   }
 
-  // V3：兜底——如果还是没找到，尝试从 html 里抓第一条“HH:MM:SS 后面紧跟一句中文”的片段
   if (!candidate) {
     const m2 = html.match(/\b\d{2}:\d{2}:\d{2}\b[\s\S]{0,40}?[\u4e00-\u9fa5][\s\S]{0,120}/);
     if (m2) candidate = m2[0].replace(/^\d{2}:\d{2}:\d{2}/, "").trim();
@@ -239,10 +233,19 @@ async function extractGelonhui(url) {
   const $ = cheerio.load(html);
   const bodyText = $("body").text() || "";
 
-  // V3：先抓到第一条“格隆汇X月X日｜...”开头，并允许更长，再用 clean 截断
   const m = bodyText.match(/格隆汇\d{1,2}月\d{1,2}日｜[\s\S]{0,900}/);
   let raw = m ? m[0] : bodyText;
-  raw = cleanGelonghui(raw);
+
+  raw = raw
+    .split("阅读")[0]
+    .split("下一页")[0]
+    .split("查看更多")[0]
+    .split("")[0]
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const m2 = raw.slice(10).match(/格隆汇\d{1,2}月\d{1,2}日｜/);
+  if (m2 && m2.index != null) raw = raw.slice(0, m2.index + 10);
 
   const summary = finalizeItem("格隆汇", raw || "格隆汇快讯");
   return { source: "格隆汇", title: summary, summary, link: url, imageUrl: null, publishedIso: new Date().toISOString() };
