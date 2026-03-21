@@ -131,6 +131,8 @@ async function extractWallstreetcn(liveUrl) {
   const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
 
   const summary = finalizeItem("华尔街见闻", raw);
+  console.log("[DBG] wscn raw:", raw.slice(0, 120))
+  console.log("[DBG] wscn summary:", summary)
   return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
 }
 
