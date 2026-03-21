@@ -10,7 +10,6 @@ if (!process.env.NOTION_TOKEN || !databaseId) {
   process.exit(1);
 }
 
-// 只保留 4 个来源
 const SOURCES = [
   { name: "金十数据", url: "https://flash.jin10.com" },
   { name: "格隆汇", url: "https://m.gelonghui.com/live" },
@@ -92,7 +91,6 @@ async function extractCls(url) {
   const text = $("body").text() || "";
   const lines = text.split(/\n/).map((s) => s.trim()).filter(Boolean);
 
-  // 必须是电报行：HH:MM【标题】正文...
   let first = lines.find((l) => /^\d{2}:\d{2}【.+?】/.test(l)) || "";
   if (!first) {
     const m = text.match(/\b\d{2}:\d{2}【[^】]+】[\s\S]{0,260}/);
@@ -101,15 +99,11 @@ async function extractCls(url) {
 
   const time = (first.match(/^(\d{2}:\d{2})/) || [])[1] || null;
 
-  // 截断：到“阅”或下一条时间出现前
   let raw = first;
   raw = raw.split("阅")[0];
   raw = raw.split(/\b\d{2}:\d{2}【/)[0];
 
-  raw = raw
-    .replace(/^\d{2}:\d{2}/, "")
-    .replace(/^【[^】]+】/, "")
-    .trim();
+  raw = raw.replace(/^\d{2}:\d{2}/, "").replace(/^【[^】]+】/, "").trim();
 
   const summary = finalizeItem("财联社", raw);
   return { source: "财联社", title: summary, summary, link: url, imageUrl: null, publishedIso: parseIsoInChina(time) };
@@ -150,17 +144,10 @@ async function extractGelonhui(url) {
   const $ = cheerio.load(html);
   const bodyText = $("body").text() || "";
 
-  // 抓第一条“格隆汇X月X日｜...”
   const m = bodyText.match(/格隆汇\d{1,2}月\d{1,2}日｜[\s\S]{0,900}/);
   let raw = m ? m[0] : bodyText;
 
-  // 截断标记
-  raw = raw.split("阅读")[0];
-  raw = raw.split("下一页")[0];
-  raw = raw.split("查看更多")[0];
-  raw = raw.split("")[0];
-
-  // 第二条出现就截断
+  raw = raw.split("阅读")[0].split("下一页")[0].split("查看更多")[0].split("")[0];
   const m2 = raw.slice(10).match(/格隆汇\d{1,2}月\d{1,2}日｜/);
   if (m2 && m2.index != null) raw = raw.slice(0, m2.index + 10);
 
@@ -170,42 +157,57 @@ async function extractGelonhui(url) {
   return { source: "格隆汇", title: summary, summary, link: url, imageUrl: null, publishedIso: new Date().toISOString() };
 }
 
+function stripTags(s) {
+  return String(s || "")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 async function extractJin10(url) {
   const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
 
-  const text = $("body").text() || "";
-  const lines = text.split(/\n/).map((s) => s.trim()).filter(Boolean);
-
-  const firstTimeLine = lines.find((l) => /^\d{2}:\d{2}:\d{2}$/.test(l));
-  const idx = firstTimeLine ? lines.indexOf(firstTimeLine) : -1;
-  const time = firstTimeLine || null;
+  // 1) 先从 HTML 找第一条时间戳
+  const tm = html.match(/\b(\d{2}:\d{2}:\d{2})\b/);
+  const time = tm ? tm[1] : null;
 
   let candidate = "";
-  const start = Math.max(idx, 0);
-  const end = Math.min(lines.length, idx >= 0 ? idx + 140 : 140);
-  for (let i = start; i < end; i++) {
-    const line = lines[i];
-    if (isNoise(line)) continue;
-    if (!/[\u4e00-\u9fa5]/.test(line)) continue;
-    if (/(查看更多|扫码|订阅|登录|APP|下载|设置|桌面通知|声音提示|字体大小|内容筛选|恢复默认|金十数据APP)/.test(line)) continue;
-    if (line.length < 10 || line.length > 220) continue;
-    if (/^(重要事件|市场快讯|VIP快讯|分类|推荐阅读)$/.test(line)) continue;
-    candidate = line;
-    break;
+
+  if (time) {
+    // 2) 从时间戳之后截一段，去标签后找第一句中文
+    const pos = html.indexOf(time);
+    const slice = pos >= 0 ? html.slice(pos, pos + 5000) : html.slice(0, 5000);
+    const plain = stripTags(slice);
+
+    // 去掉时间本身
+    const plain2 = plain.replace(time, " ").trim();
+
+    // 找第一段包含中文的句子
+    const parts = plain2.split(/(?<=[。！!？?])/);
+    candidate = parts.find((p) => /[\u4e00-\u9fa5]/.test(p) && p.length >= 10 && p.length <= 220) || "";
+
+    // 如果分句没找到，就退回到前 220 字
+    if (!candidate && /[\u4e00-\u9fa5]/.test(plain2)) {
+      candidate = pickTextSnippet(plain2, 220);
+    }
   }
 
-  // HTML 兜底：从 time 后抓一段中文
-  if (!candidate) {
-    const m2 = html.match(/\b\d{2}:\d{2}:\d{2}\b[\s\S]{0,50}?[\u4e00-\u9fa5][\s\S]{0,160}/);
-    if (m2) candidate = m2[0].replace(/^\d{2}:\d{2}:\d{2}/, "").trim();
+  // 3) 最后兜底：明确写入失败原因（避免 SKIP）
+  if (!candidate || isNoise(candidate)) {
+    candidate = "金十正文抓取失败：入口页返回内容疑似脚本/空壳（可能反爬或前端渲染）。";
   }
 
   const summary = finalizeItem("金十数据", candidate);
 
-  const yyyy = String(new Date().getFullYear());
-  const mm = String(new Date().getMonth() + 1).padStart(2, "0");
-  const dd = String(new Date().getDate()).padStart(2, "0");
+  const now = new Date();
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
   const publishedIso = parseIsoInChina(time ? `${yyyy}-${mm}-${dd} ${time}` : null);
 
   return { source: "金十数据", title: summary, summary, link: url, imageUrl: null, publishedIso };
@@ -222,7 +224,7 @@ async function notionHasDedupeKey(dedupeKey) {
 
 async function createNotionRow(item) {
   const dedupeKey = makeDedupeKey(item);
-  const contentLines = [item.summary, item.imageUrl ? `图片：${item.imageUrl}` : "", `原文：${item.link}`].filter(Boolean);
+  const contentLines = [item.summary, `原文：${item.link}`].filter(Boolean);
 
   await notion.pages.create({
     parent: { database_id: databaseId },
@@ -231,7 +233,7 @@ async function createNotionRow(item) {
       来源: { select: { name: item.source } },
       原文链接: { url: item.link },
       内容摘要: { rich_text: [{ text: { content: item.summary } }] },
-      图片链接: { url: item.imageUrl || null },
+      图片链接: { url: null },
       去重键: { rich_text: [{ text: { content: dedupeKey } }] },
       发布时间: { date: { start: item.publishedIso } },
     },
