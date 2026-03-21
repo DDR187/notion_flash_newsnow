@@ -19,7 +19,6 @@ const SOURCES = [
 ];
 
 function makeDedupeKey(item) {
-	// 精确到分钟，避免入口页链接相同导致永远不新增
 	const minute = item.publishedIso.slice(0, 16); // YYYY-MM-DDTHH:MM
 	return `${item.source}|${minute}|${item.summary}`;
 }
@@ -36,14 +35,6 @@ async function fetchHtml(url) {
 	return await res.text();
 }
 
-function normalizeUrl(href, base) {
-	if (!href) return null;
-	if (href.startsWith("http")) return href;
-	if (href.startsWith("//")) return "https:" + href;
-	if (href.startsWith("/")) return base.replace(/\/$/, "") + href;
-	return base.replace(/\/$/, "") + "/" + href;
-}
-
 function pickTextSnippet(text, maxLen = 200) {
 	const t = String(text || "").replace(/\s+/g, " ").trim();
 	return t.length > maxLen ? t.slice(0, maxLen) + "…" : t;
@@ -52,41 +43,22 @@ function pickTextSnippet(text, maxLen = 200) {
 function isNoise(s) {
 	const t = String(s || "").trim();
 	if (!t) return true;
-
-	// 常见脚本/埋点/配置
 	if (/^(\/\/|window\.|function\s|gtag\(|dataLayer\b|_hmt\b)/i.test(t)) return true;
-
-	// 36氪页面入口常见误抓
 	if (t === "快讯" || t === "账号设置" || t.length < 4) return true;
-
-	// 导航/频道堆叠
 	if (t.length > 300 && /(登录|搜索|账号设置|城市合作|企业服务|关于36氪)/.test(t)) return true;
-
 	return false;
 }
 
 function parseIsoInChina(t) {
-	// 输入："2026-03-20 11:40:12" 或 "03-20 12:21:07" 或 "12:11"
-	// 输出：ISO string（尽量精确到分钟/秒）；取不到则用当前时间
 	const now = new Date();
 	const year = now.getFullYear();
-
 	if (!t) return now.toISOString();
-
 	const s = String(t).trim();
-
-	// 2026-03-20 11:40:12
-	if (/^20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(s)) {
-		return new Date(s.replace(" ", "T") + "+08:00").toISOString();
-	}
-
-	// 03-20 12:21:07
+	if (/^20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}/.test(s)) return new Date(s.replace(" ", "T") + "+08:00").toISOString();
 	if (/^\d{2}-\d{2}\s+\d{2}:\d{2}/.test(s)) {
 		const [md, hm] = s.split(/\s+/);
 		return new Date(`${year}-${md}T${hm}+08:00`).toISOString();
 	}
-
-	// 12:11（默认当天）
 	if (/^\d{2}:\d{2}/.test(s)) {
 		const yyyy = String(year);
 		const mm = String(now.getMonth() + 1).padStart(2, "0");
@@ -94,14 +66,12 @@ function parseIsoInChina(t) {
 		const hhmm = s.slice(0, 5);
 		return new Date(`${yyyy}-${mm}-${dd}T${hhmm}:00+08:00`).toISOString();
 	}
-
 	return now.toISOString();
 }
 
 function finalizeItem(source, raw) {
 	const base = pickTextSnippet(raw, 200);
-	const summary = `${base}（${source}）`;
-	return summary;
+	return `${base}（${source}）`;
 }
 
 async function extractLatest(sourceName, url) {
@@ -116,11 +86,9 @@ async function extractLatest(sourceName, url) {
 async function extractWallstreetcn(url) {
 	const html = await fetchHtml(url);
 	const $ = cheerio.load(html);
-
-	// 第一条 juicy 编辑链接里的 ID
 	const m = html.match(/livenews\/edit\/(\d{6,})/);
 	const id = m ? m[1] : null;
-	const link = id ? `https://wallstreetcn.com/livenews/${id}` : url;
+	const link = id ? `{{https://wallstreetcn.com/livenews/${id}}}` : url;
 
 	let text = "";
 	if (id) {
@@ -129,74 +97,53 @@ async function extractWallstreetcn(url) {
 		text = container.text() || a.parent().text() || "";
 	}
 	if (!text) {
-		// 兜底：找第一个【】标题附近文本
 		const a0 = $("a[href*='livenews/edit']").first();
 		text = a0.closest("li, div").text() || $("body").text() || "";
 	}
 
 	const cleaned = pickTextSnippet(text, 260);
-
-	// 时间：页面里一般有类似 "03:57"，取最先出现的 HH:MM
 	const timeMatch = html.match(/\b\d{2}:\d{2}\b/);
 	const publishedIso = parseIsoInChina(timeMatch ? timeMatch[0] : null);
 
-	// 摘要：优先取【】后的内容；没有就用 cleaned
 	let raw = cleaned;
 	const titleMatch = cleaned.match(/【([^】]{4,60})】/);
 	if (titleMatch) {
 		raw = cleaned.replace(/^[\s\S]*?】\s*/, "").trim();
 		if (!raw) raw = titleMatch[1];
 	}
-
 	const summary = finalizeItem("华尔街见闻", raw);
 
-	return {
-		source: "华尔街见闻",
-		title: summary,
-		summary,
-		link,
-		imageUrl: null,
-		publishedIso,
-	};
+	return { source: "华尔街见闻", title: summary, summary, link, imageUrl: null, publishedIso };
 }
 
 async function extractCls(url) {
 	const html = await fetchHtml(url);
 	const $ = cheerio.load(html);
-
 	const text = $("body").text() || "";
 	const lines = text.split(/\n/).map((s) => s.trim()).filter(Boolean);
 
-	// 找第一条形如 12:11【...】
 	const first = lines.find((l) => /^\d{2}:\d{2}【/.test(l)) || "";
 	const time = (first.match(/^(\d{2}:\d{2})/) || [])[1] || null;
 
-	let raw = first;
-	if (!raw) raw = lines[0] || "";
+	let raw = first || lines[0] || "";
+	// 关键：截断到“阅”前，避免把下一条拼进来
+	raw = raw.split("阅")[0];
+	// 也防止出现第二条时间
+	raw = raw.split(/\d{2}:\d{2}【/)[0];
 
-	// 去掉开头时间与【标题】
 	raw = raw
 		.replace(/^\d{2}:\d{2}/, "")
 		.replace(/^【[^】]+】/, "")
 		.trim();
 
 	const summary = finalizeItem("财联社", raw || "财联社电报");
-
-	return {
-		source: "财联社",
-		title: summary,
-		summary,
-		link: url,
-		imageUrl: null,
-		publishedIso: parseIsoInChina(time),
-	};
+	return { source: "财联社", title: summary, summary, link: url, imageUrl: null, publishedIso: parseIsoInChina(time) };
 }
 
 async function extract36kr(url) {
 	const html = await fetchHtml(url);
 	const $ = cheerio.load(html);
 
-	// 只接受 /newsflashes/数字ID
 	const m = html.match(/href=\"(\/newsflashes\/\d+)\"/);
 	const link = m ? `https://www.36kr.com${m[1]}` : url;
 
@@ -208,17 +155,18 @@ async function extract36kr(url) {
 	}
 	if (!raw) raw = $("body").text() || "";
 
-	// 尽量去掉大量导航，取前 200 字
-	const summary = finalizeItem("36氪", raw);
+	// 关键：去掉 UI 文案
+	raw = raw
+		.replace(/\d+\s*分钟前/g, "")
+		.replace(/分享至/g, "")
+		.replace(/打开微信.*?按钮/g, "")
+		.replace(/打开微信/g, "")
+		.replace(/扫一扫/g, "")
+		.replace(/右上角分享按钮/g, "")
+		.trim();
 
-	return {
-		source: "36氪",
-		title: summary,
-		summary,
-		link,
-		imageUrl: null,
-		publishedIso: new Date().toISOString(),
-	};
+	const summary = finalizeItem("36氪", raw);
+	return { source: "36氪", title: summary, summary, link, imageUrl: null, publishedIso: new Date().toISOString() };
 }
 
 async function extractJin10(url) {
@@ -234,11 +182,14 @@ async function extractJin10(url) {
 
 	let candidate = "";
 	const start = Math.max(idx, 0);
-	const end = Math.min(lines.length, (idx >= 0 ? idx + 15 : 15));
+	// V2：扫描范围扩大
+	const end = Math.min(lines.length, idx >= 0 ? idx + 60 : 60);
 	for (let i = start; i < end; i++) {
 		const line = lines[i];
 		if (isNoise(line)) continue;
 		if (!/[\u4e00-\u9fa5]/.test(line)) continue;
+		if (/(查看更多|扫码|订阅|登录|金十数据APP)/.test(line)) continue;
+		if (line.length < 10 || line.length > 220) continue;
 		candidate = line;
 		break;
 	}
@@ -250,44 +201,36 @@ async function extractJin10(url) {
 	const dd = String(new Date().getDate()).padStart(2, "0");
 	const publishedIso = parseIsoInChina(time ? `${yyyy}-${mm}-${dd} ${time}` : null);
 
-	return {
-		source: "金十数据",
-		title: summary,
-		summary,
-		link: url,
-		imageUrl: null,
-		publishedIso,
-	};
+	return { source: "金十数据", title: summary, summary, link: url, imageUrl: null, publishedIso };
 }
 
 async function extractGelonhui(url) {
 	const html = await fetchHtml(url);
 	const $ = cheerio.load(html);
-
-	// 兜底策略：找第一个出现的“格隆汇X月X日｜...”
 	const bodyText = $("body").text() || "";
-	const m = bodyText.match(/格隆汇\d{1,2}月\d{1,2}日[\s\S]{0,220}/);
-	const raw = m ? m[0] : bodyText;
 
+	// 先抓到第一条“格隆汇X月X日｜...”开头
+	const m = bodyText.match(/格隆汇\d{1,2}月\d{1,2}日｜[\s\S]{0,600}/);
+	let raw = m ? m[0] : bodyText;
+
+	// V2：截断到下一条快讯或“阅读”等标记前
+	const second = raw.slice(10).match(/格隆汇\d{1,2}月\d{1,2}日｜/);
+	if (second && second.index != null) {
+		raw = raw.slice(0, second.index + 10);
+	}
+	if (raw.includes("阅读")) raw = raw.split("阅读")[0];
+	if (raw.includes("下一页")) raw = raw.split("下一页")[0];
+
+	raw = raw.trim();
 	const summary = finalizeItem("格隆汇", raw);
 
-	return {
-		source: "格隆汇",
-		title: summary,
-		summary,
-		link: url,
-		imageUrl: null,
-		publishedIso: new Date().toISOString(),
-	};
+	return { source: "格隆汇", title: summary, summary, link: url, imageUrl: null, publishedIso: new Date().toISOString() };
 }
 
 async function notionHasDedupeKey(dedupeKey) {
 	const resp = await notion.databases.query({
 		database_id: databaseId,
-		filter: {
-			property: "去重键",
-			rich_text: { equals: dedupeKey },
-		},
+		filter: { property: "去重键", rich_text: { equals: dedupeKey } },
 		page_size: 1,
 	});
 	return resp.results.length > 0;
@@ -295,7 +238,6 @@ async function notionHasDedupeKey(dedupeKey) {
 
 async function createNotionRow(item) {
 	const dedupeKey = makeDedupeKey(item);
-
 	const contentLines = [item.summary, item.imageUrl ? `图片：${item.imageUrl}` : "", `原文：${item.link}`].filter(Boolean);
 
 	await notion.pages.create({
@@ -324,14 +266,12 @@ async function main() {
 		try {
 			const item = await extractLatest(s.name, s.url);
 
-			// 写入前丢弃噪音
 			if (isNoise(item.summary) || isNoise(item.title)) {
 				console.log(`[SKIP] noise ${item.source}`);
 				continue;
 			}
 
 			const dedupeKey = makeDedupeKey(item);
-
 			if (await notionHasDedupeKey(dedupeKey)) {
 				console.log(`[SKIP] ${item.source} exists: ${dedupeKey}`);
 				continue;
