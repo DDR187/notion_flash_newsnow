@@ -10,17 +10,14 @@ if (!process.env.NOTION_TOKEN || !databaseId) {
   process.exit(1);
 }
 
-// 三个来源：格隆汇 / 36氪 / 财联社
+const WINDOW_MINUTES = 10;
+const SCAN_LIMIT = 20;
+
 const SOURCES = [
   { name: "格隆汇", url: "https://m.gelonghui.com/live" },
   { name: "36氪", url: "https://www.36kr.com/newsflashes" },
   { name: "财联社", url: "https://m.cls.cn/telegraph" },
 ];
-
-function makeDedupeKey(item) {
-  const minute = item.publishedIso.slice(0, 16);
-  return `${item.source}|${minute}|${item.summary}`;
-}
 
 async function fetchHtml(url) {
   const res = await fetch(url, {
@@ -77,95 +74,18 @@ function finalizeItem(source, raw) {
   return `${base}（${source}）`;
 }
 
-async function extractLatest(sourceName, url) {
-  if (sourceName === "财联社") return extractCls(url);
-  if (sourceName === "36氪") return extract36kr(url);
-  if (sourceName === "格隆汇") return extractGelonhui(url);
-  throw new Error("Unknown source: " + sourceName);
+function makeDedupeKey(item) {
+  // 最稳：来源 + 链接
+  if (item.link) return `${item.source}|${item.link}`;
+  // 兜底
+  const minute = item.publishedIso.slice(0, 16);
+  return `${item.source}|${minute}|${item.summary}`;
 }
 
-async function extractCls(url) {
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
-  const text = $("body").text() || "";
-  const lines = text.split(/\n/).map((s) => s.trim()).filter(Boolean);
-
-  // 方案1：标准电报行
-  let first = lines.find((l) => /^\d{2}:\d{2}【.+?】/.test(l)) || "";
-
-  // 方案2：从整页抓 HH:MM【】附近
-  if (!first) {
-    const m = text.match(/\b\d{2}:\d{2}【[^】]+】[\s\S]{0,320}/);
-    first = m ? m[0] : "";
-  }
-
-  // 方案3：页面结构变化时，抓第一个 HH:MM 后面一段中文
-  if (!first) {
-    const m2 = text.match(/\b\d{2}:\d{2}\b[\s\S]{0,260}/);
-    first = m2 ? m2[0] : "";
-  }
-
-  const time = (first.match(/\b(\d{2}:\d{2})\b/) || [])[1] || null;
-
-  let raw = first || "";
-  raw = raw.split("阅")[0];
-  raw = raw.replace(/^\d{2}:\d{2}/, "").replace(/^【[^】]+】/, "").trim();
-  raw = raw.replace(/\s+/g, " ").trim();
-
-  // 仍然没正文：写入失败原因（避免 silent skip）
-  if (!raw || isNoise(raw) || !/[\u4e00-\u9fa5]/.test(raw)) {
-    raw = "财联社正文抓取失败：页面结构可能变更或返回空壳。";
-  }
-
-  const summary = finalizeItem("财联社", raw);
-  return { source: "财联社", title: summary, summary, link: url, imageUrl: null, publishedIso: parseIsoInChina(time) };
-}
-
-async function extract36kr(url) {
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
-
-  const m = html.match(/href=\"(\/newsflashes\/\d+)\"/);
-  const path = m ? m[1] : null;
-  const link = path ? `https://www.36kr.com${path}` : url;
-
-  let raw = "";
-  if (path) {
-    const a = $(`a[href*="${path}"],a[href="${path}"]`).first();
-    const container = a.closest("div");
-    raw = container.text() || a.parent().text() || "";
-  }
-  if (!raw) raw = $("body").text() || "";
-
-  raw = raw
-    .replace(/\d+\s*分钟前/g, " ")
-    .replace(/分享至/g, " ")
-    .replace(/打开微信“扫一扫”[\s\S]*?分享按钮/g, " ")
-    .replace(/打开微信/g, " ")
-    .replace(/扫一扫/g, " ")
-    .replace(/点击屏幕右上角分享按钮/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-
-  const summary = finalizeItem("36氪", raw);
-  return { source: "36氪", title: summary, summary, link, imageUrl: null, publishedIso: new Date().toISOString() };
-}
-
-async function extractGelonhui(url) {
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
-  const bodyText = $("body").text() || "";
-
-  const m = bodyText.match(/格隆汇\d{1,2}月\d{1,2}日｜[\s\S]{0,900}/);
-  let raw = m ? m[0] : bodyText;
-
-  raw = raw.split("阅读")[0].split("下一页")[0].split("查看更多")[0].split("")[0];
-  const m2 = raw.slice(10).match(/格隆汇\d{1,2}月\d{1,2}日｜/);
-  if (m2 && m2.index != null) raw = raw.slice(0, m2.index + 10);
-
-  raw = raw.replace(/\s+/g, " ").trim();
-  const summary = finalizeItem("格隆汇", raw);
-  return { source: "格隆汇", title: summary, summary, link: url, imageUrl: null, publishedIso: new Date().toISOString() };
+function withinWindow(publishedIso) {
+  const t = new Date(publishedIso).getTime();
+  const now = Date.now();
+  return now - t <= WINDOW_MINUTES * 60 * 1000;
 }
 
 async function notionHasDedupeKey(dedupeKey) {
@@ -186,7 +106,7 @@ async function createNotionRow(item) {
     properties: {
       标题: { title: [{ text: { content: item.summary } }] },
       来源: { select: { name: item.source } },
-      原文链接: { url: item.link },
+      原文链接: { url: item.link || null },
       内容摘要: { rich_text: [{ text: { content: item.summary } }] },
       图片链接: { url: null },
       去重键: { rich_text: [{ text: { content: dedupeKey } }] },
@@ -200,26 +120,143 @@ async function createNotionRow(item) {
   });
 }
 
+async function extractItems(sourceName, url) {
+  if (sourceName === "财联社") return extractClsItems(url);
+  if (sourceName === "36氪") return extract36krItems(url);
+  if (sourceName === "格隆汇") return extractGelonhuiItems(url);
+  throw new Error("Unknown source: " + sourceName);
+}
+
+async function extractClsItems(url) {
+  const html = await fetchHtml(url);
+  const $ = cheerio.load(html);
+  const text = $("body").text() || "";
+
+  // 抓多条：HH:MM【标题】正文...
+  const re = /(\b\d{2}:\d{2}\b)【([^】]{2,80})】([\s\S]{0,260}?)(?=\b\d{2}:\d{2}\b【|$)/g;
+  const items = [];
+  let m;
+  while ((m = re.exec(text)) && items.length < SCAN_LIMIT) {
+    const time = m[1];
+    const title = m[2];
+    const body = String(m[3] || "").split("阅")[0].trim();
+    const raw = body || title;
+    const summary = finalizeItem("财联社", raw);
+    if (!summary || isNoise(summary)) continue;
+
+    items.push({
+      source: "财联社",
+      summary,
+      link: url,
+      imageUrl: null,
+      publishedIso: parseIsoInChina(time),
+    });
+  }
+
+  return items;
+}
+
+async function extract36krItems(url) {
+  const html = await fetchHtml(url);
+  const $ = cheerio.load(html);
+
+  const hrefs = [];
+  const seen = new Set();
+  $("a[href^='/newsflashes/']").each((_, el) => {
+    const h = $(el).attr("href");
+    if (!h) return;
+    if (!/^\/newsflashes\/\d+/.test(h)) return;
+    if (seen.has(h)) return;
+    seen.add(h);
+    hrefs.push(h);
+  });
+
+  const picked = hrefs.slice(0, SCAN_LIMIT);
+  const items = [];
+
+  for (const path of picked) {
+    const link = `https://www.36kr.com${path}`;
+    const a = $(`a[href='${path}'],a[href*='${path}']`).first();
+    const container = a.closest("div");
+    let raw = container.text() || a.parent().text() || "";
+    if (!raw) raw = $("body").text() || "";
+
+    raw = raw
+      .replace(/\d+\s*分钟前/g, " ")
+      .replace(/分享至/g, " ")
+      .replace(/打开微信“扫一扫”[\s\S]*?分享按钮/g, " ")
+      .replace(/打开微信/g, " ")
+      .replace(/扫一扫/g, " ")
+      .replace(/点击屏幕右上角分享按钮/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    const summary = finalizeItem("36氪", raw);
+    if (!summary || isNoise(summary)) continue;
+
+    // 36kr 页面上时间不稳定，这里用 now；靠 link 去重即可
+    items.push({
+      source: "36氪",
+      summary,
+      link,
+      imageUrl: null,
+      publishedIso: new Date().toISOString(),
+    });
+  }
+
+  return items;
+}
+
+async function extractGelonhuiItems(url) {
+  const html = await fetchHtml(url);
+  const $ = cheerio.load(html);
+  const bodyText = $("body").text() || "";
+
+  // 用“格隆汇X月X日｜”作为分隔符抓多条
+  const parts = bodyText.split(/(?=格隆汇\d{1,2}月\d{1,2}日｜)/).filter(Boolean);
+  const picked = parts.slice(0, SCAN_LIMIT);
+  const items = [];
+
+  for (const p of picked) {
+    let raw = p;
+    raw = raw.split("阅读")[0].split("下一页")[0].split("查看更多")[0].split("")[0];
+    raw = raw.replace(/\s+/g, " ").trim();
+
+    const summary = finalizeItem("格隆汇", raw);
+    if (!summary || isNoise(summary)) continue;
+
+    // 格隆汇页时间字段不稳定：用 now；靠 summary+来源 去重也行，但这里优先用 link
+    items.push({
+      source: "格隆汇",
+      summary,
+      link: url,
+      imageUrl: null,
+      publishedIso: new Date().toISOString(),
+    });
+  }
+
+  return items;
+}
+
 async function main() {
   console.log("Run at", new Date().toISOString());
 
   for (const s of SOURCES) {
     try {
-      const item = await extractLatest(s.name, s.url);
+      const items = await extractItems(s.name, s.url);
+      const fresh = items.filter((it) => withinWindow(it.publishedIso));
 
-      if (isNoise(item.summary) || isNoise(item.title)) {
-        console.log(`[SKIP] noise ${item.source}`);
-        continue;
+      let added = 0;
+      for (const item of fresh) {
+        const dedupeKey = makeDedupeKey(item);
+        if (await notionHasDedupeKey(dedupeKey)) continue;
+
+        await createNotionRow(item);
+        added += 1;
+        console.log(`[ADD] ${item.source}: ${item.summary}`);
       }
 
-      const dedupeKey = makeDedupeKey(item);
-      if (await notionHasDedupeKey(dedupeKey)) {
-        console.log(`[SKIP] ${item.source} exists: ${dedupeKey}`);
-        continue;
-      }
-
-      await createNotionRow(item);
-      console.log(`[ADD] ${item.source}: ${item.summary}`);
+      if (added === 0) console.log(`[SKIP] ${s.name} no new items`);
     } catch (e) {
       console.error(`[ERR] ${s.name}`, e.message);
     }
