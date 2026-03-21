@@ -198,9 +198,7 @@ async function extractJin10(url) {
   }
 
   // 3) 最后兜底：明确写入失败原因（避免 SKIP）
-  if (!candidate || isNoise(candidate)) {
-    candidate = "金十正文抓取失败：入口页返回内容疑似脚本/空壳（可能反爬或前端渲染）。";
-  }
+  if (!candidate || isNoise(candidate) || !/[\\u4e00-\\u9fa5]/.test(candidate)) { candidate = "金十正文抓取失败..." }
 
   const summary = finalizeItem("金十数据", candidate);
 
